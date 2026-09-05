@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+# The database is project state and lives under the PROJECT's build directory,
+# never here. Bifrost is the machinery; it is pointed at a project.
+*.db
+*.db-wal
+*.db-shm
