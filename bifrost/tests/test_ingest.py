@@ -315,6 +315,60 @@ def test_accepted_exception_keeps_a_gate_green():
     return "justified failures stay green, new ones do not"
 
 
+def test_output_with_no_verdict_is_refused_not_recorded():
+    """Rows 11-19 of the BF3 database, and why they must not be possible.
+
+    `git log --oneline -1` was ingested as a run of corpus_matattr: recorded red,
+    and mined for the metric `read_the_material_sets: 7592` out of the commit
+    subject `3dc7592 Read the material sets, ...`. Neither half is true, and a
+    red row costs someone an afternoon looking for the defect.
+    """
+    conn = fresh()
+    junk = {
+        "a commit subject": "3dc7592 Read the material sets, the combination rule",
+        "an ls -l":         "-rwxr-xr-x 1 jwall 197609 236032 2026-09-04 build/x.exe",
+        "a traceback":      "Segmentation fault\nAborted\n",
+        "nothing at all":   "",
+    }
+    for what, text in junk.items():
+        parsed = ingest.parse_gate_stdout("corpus_mesh", text)
+        check(parsed["recognised"] is False, f"{what}: must not be recognised")
+        check(parsed["ok"] == 0, f"{what}: must never report ok")
+        try:
+            ingest.ingest_gate_run(conn, "corpus_mesh", text, commit_sha="abc")
+            raise AssertionError(f"{what}: was recorded, and must not have been")
+        except BifrostError:
+            pass
+    n = conn.execute("SELECT COUNT(*) FROM gate_run").fetchone()[0]
+    check(n == 0, f"nothing may reach gate_run, got {n} rows")
+
+    # and no metric may be mined out of text nobody could parse
+    got = ingest.parse_gate_stdout("corpus_mesh", junk["a commit subject"])
+    check(list(got["metrics"]) == ["parse_note"], str(got["metrics"]))
+    return f"{len(junk)} kinds of non-output, all refused, no metrics invented"
+
+
+def test_a_pass_literal_in_source_is_not_a_verdict():
+    """`"[PASS]" in text` matched the probe's own source. A sed of
+    corpus_matattr.cpp was recorded as a green run of corpus_matattr."""
+    source = (
+        '    const bool pass = (chainBreaks == 0) && (all.setUnknown == 0);\n'
+        '    std::cout << "\\n" << (pass ? "[PASS]" : "[FAIL]") << " "\n'
+        '              << all.descriptors << " descriptors" << std::endl;\n'
+    )
+    got = ingest.parse_gate_stdout("corpus_matattr", source)
+    check(got["ok"] == 0, "a source listing must never report ok")
+    check(got["recognised"] is False, "a source listing is not a gate run")
+
+    # while the verdict the probe actually PRINTS, counts and all, still reads
+    real = "[PASS] 868129 descriptors: 0 naming an unknown set, 0 with a texture id past"
+    check(ingest.parse_gate_stdout("corpus_matattr", real)["ok"] == 1, real)
+    check(ingest.parse_gate_stdout("corpus_matattr",
+                                   real.replace("[PASS]", "[FAIL]"))["ok"] == 0,
+          "and so does the failing branch, which carries counts after the verdict")
+    return "the literal in the source is inert; the printed verdict still reads"
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

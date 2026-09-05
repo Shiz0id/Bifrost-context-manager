@@ -238,6 +238,14 @@ _WALK = re.compile(r"(\d[\d,]*)[ \t]+walk\b", re.I)
 _PARSEFAIL = re.compile(r"(\d[\d,]*)[ \t]+failed to parse", re.I)
 _NUMBERED = re.compile(r"([\d,]{2,})\s+([a-z][a-z_ ]{2,30}?)(?=[,;.\n]|$)", re.I)
 
+# A verdict has to START a line. `"[PASS]" in text` also matches the literal
+# inside the probe's OWN SOURCE -- `std::cout << (pass ? "[PASS]" : "[FAIL]")`
+# -- which is how a `sed` of corpus_matattr.cpp came to be recorded as a green
+# run of corpus_matattr. A bare PASS/FAIL must be the whole line; a bracketed
+# one may carry its counts after it, which is how the probes actually print.
+_VERDICT_PASS = re.compile(r"^[ \t]*(?:\[PASS\]|PASS[ \t]*$)", re.M)
+_VERDICT_FAIL = re.compile(r"^[ \t]*(?:\[FAIL\]|FAIL[ \t]*$)", re.M)
+
 
 def _num(s: str) -> int:
     return int(s.replace(",", ""))
@@ -251,7 +259,8 @@ def parse_gate_stdout(name: str, text: str) -> dict:
     result for output nobody understood is exactly the failure AGENTS.md rule 7
     is about.
     """
-    out: dict = {"pass": None, "fail": None, "refused": None, "metrics": {}, "ok": 0}
+    out: dict = {"pass": None, "fail": None, "refused": None, "metrics": {},
+                 "ok": 0, "recognised": True}
 
     tail = "\n".join(text.strip().splitlines()[-40:])
 
@@ -274,9 +283,8 @@ def parse_gate_stdout(name: str, text: str) -> dict:
         out["refused"] = _num(m.group(1))
 
     # explicit verdicts win over inference
-    upper = text.upper()
-    explicit_pass = bool(re.search(r"^\s*(\[PASS\]|PASS)\s*$", text, re.M)) or "[PASS]" in upper
-    explicit_fail = bool(re.search(r"^\s*(\[FAIL\]|FAIL)\s*$", text, re.M))
+    explicit_fail = bool(_VERDICT_FAIL.search(text))
+    explicit_pass = bool(_VERDICT_PASS.search(text))
 
     if explicit_fail:
         out["ok"] = 0
@@ -287,7 +295,16 @@ def parse_gate_stdout(name: str, text: str) -> dict:
     elif out["pass"]:
         out["ok"] = 1
     else:
+        # Nothing here says how a run went, so this text is not a gate run at
+        # all -- it is a grep, a traceback, or a log that was lost. Report that
+        # as its own state rather than as a failure: ingest_gate_run refuses it,
+        # because a red row invites someone to go looking for a defect that was
+        # never there, and mining free text for metrics under those conditions
+        # is how `read_the_material_sets: 7592` got into the database, parsed
+        # out of the commit subject `3dc7592 Read the material sets, ...`.
+        out["recognised"] = False
         out["metrics"]["parse_note"] = "no pass/fail summary found in the last 40 lines"
+        return out
 
     for m in _NUMBERED.finditer(tail):
         label = m.group(2).strip().lower().replace(" ", "_")
@@ -322,6 +339,19 @@ def ingest_gate_run(conn: sqlite3.Connection, gate_name: str, stdout: str,
         tree_dirty = core.tree_dirty(readers) if readers else core.tree_dirty()
 
     parsed = parse_gate_stdout(gate_name, stdout)
+
+    # Refuse rather than record. A run row is a claim that this gate was run and
+    # this is how it went; text with no verdict in it supports neither half, and
+    # recording it as a failure spends someone's afternoon on a defect that does
+    # not exist. gate_run rows 11-19 of the BF3 database are what this prevents:
+    # greps, an `ls -l` and a README, ingested because a hook matched a gate name
+    # in a command that only mentioned it. They have since been deleted.
+    if not parsed["recognised"]:
+        first = (stdout.strip().splitlines() or ["<empty>"])[0][:100]
+        raise BifrostError(
+            f"{gate_name}: this output carries no pass/fail verdict, so it is not a "
+            f"gate run and has not been recorded. If the probe did run, its output "
+            f"was lost -- re-run it and record that. First line: {first!r}")
 
     # AGENTS.md rule 4 asks for pass/fail counts with every failure JUSTIFIED --
     # not for zero failures. corpus_mesh has reported "1 fail" since the krayt

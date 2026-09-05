@@ -31,9 +31,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bifrost import core, digest, ingest  # noqa: E402
 
-# A Bash command that ran one of the corpus probes. The gate name is the probe's
-# own executable name, which is also its key in the gate table.
-PROBE_RE = re.compile(r"\b(corpus_[a-z_0-9]+)(?:\.exe)?\b")
+# A Bash command that actually RAN one of the corpus probes -- not one that
+# merely mentions it. That distinction is the whole hook. The first version
+# matched the gate name anywhere in the command string, so `grep corpus_mesh
+# README.md` counted as a run and its stdout was ingested as gate output:
+# gate_run rows 11-19 of the BF3 database, since deleted, were greps, an
+# `ls -l` and a README, and three of them went in GREEN, because README prose
+# carries "0 failed" and the probe source carries a "[PASS]" literal. A
+# fabricated green gate is the one thing this database exists to make
+# impossible.
+#
+# So the probe has to sit in COMMAND position -- the first word of the command,
+# or of a segment after ; && || | or a newline, past any VAR=value prefixes --
+# and carry a path or an .exe, which a bare mention in a grep pattern does not.
+# Deliberately strict: a missed run is recorded by hand a moment later, while a
+# false one has to be noticed before it can be undone.
+PROBE_RE = re.compile(
+    r"""(?:\A|[;&|\n(]|&&|\|\|)     # the start of a pipeline segment
+        \s*
+        (?:\w+=\S*\s+)*             # VAR=value prefixes
+        (?:[.\w:+-]*[/\\])*         # an optional directory part
+        (corpus_[a-z_0-9]+)         # the probe, which is also the gate name
+        (?:\.exe)?
+        (?=\s|\Z|[;&|<>])           # a whole word: not corpus_mesh.cpp
+    """,
+    re.X,
+)
 
 
 def _emit(obj: dict) -> None:

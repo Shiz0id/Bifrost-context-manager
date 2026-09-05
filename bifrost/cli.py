@@ -232,8 +232,13 @@ def cmd_query(conn, args):
 
 def cmd_run(conn, args):
     text = Path(args.logfile).read_text(encoding="utf-8") if args.logfile else sys.stdin.read()
-    rid = ingest.ingest_gate_run(conn, args.gate, text,
-                                 stdout_dir=core.repo_root() / "build" / "bifrost_logs")
+    try:
+        rid = ingest.ingest_gate_run(conn, args.gate, text,
+                                     stdout_dir=core.repo_root() / "build" / "bifrost_logs")
+    except core.BifrostError as e:
+        # Most often: the wrong thing got piped in. Nothing was written.
+        print(f"[ERROR] {e}")
+        return 1
     row = core.one(conn, "SELECT * FROM gate_run WHERE id=?", (rid,))
     m = json.loads(row["metrics"] or "{}")
     print(f"[{'SUCCESS' if row['ok'] else 'ERROR'}] {args.gate}: "

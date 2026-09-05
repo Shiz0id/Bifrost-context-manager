@@ -214,6 +214,58 @@ def test_settings_and_mcp_config_are_wired():
     return "4 hooks + 1 cwd-independent MCP launcher, all pointing at real files"
 
 
+def test_probe_re_needs_an_invocation_not_a_mention():
+    """The regression that produced gate_run rows 11-19 of the BF3 database.
+
+    The first PROBE_RE matched the gate name anywhere in the command, so reading
+    ABOUT a probe counted as running it and the reading's stdout was ingested as
+    the result. Three of those rows went in GREEN. Every command below is one
+    this hook actually saw.
+    """
+    ran = [
+        "./build/corpus_mesh.exe > log 2>&1",
+        "build/corpus_mesh.exe",
+        'LOG=/tmp/x.log ./build/corpus_mesh.exe > "$LOG"; echo done',
+        "mkdir -p build/bifrost_logs && ./build/corpus_mesh.exe",
+        "build\\corpus_mesh.exe E:/BF3_360",
+        "./build/corpus_mesh.exe E:/BF3_360 setup.res | tail -20",
+    ]
+    mentioned = [
+        "ls -l --time-style=+%Y-%m-%dT%H:%M build/corpus_mesh.exe src/x.cpp",
+        'grep -n -i "corpus_mesh" tools/README.md | head -30',
+        "sed -n '264,420p' tools/probes/corpus_mesh.cpp",
+        'grep -n "Report" -A 45 tools/probes/corpus_mesh.cpp',
+        'cmd //c "build\\mk_mesh.bat" 2>&1 | tail -20; echo "EXIT=$?"; '
+        "ls -l build/corpus_mesh.exe",
+        'grep -n "corpus_mesh" CMakeLists.txt',
+        "cat tools/probes/corpus_mesh.cpp",
+        "echo build/corpus_mesh.exe",
+        "git log --oneline -1 -- tools/probes/corpus_mesh.cpp",
+    ]
+    for cmd in ran:
+        check(hooks.PROBE_RE.search(cmd) is not None, f"must be a run: {cmd!r}")
+    for cmd in mentioned:
+        check(hooks.PROBE_RE.search(cmd) is None, f"must NOT be a run: {cmd!r}")
+    return f"{len(ran)} invocations matched, {len(mentioned)} mentions ignored"
+
+
+def test_post_tool_use_does_not_record_a_grep():
+    """End to end: the README grep that went in as a passing run of the gate."""
+    conn = core.connect(":memory:")
+    core.migrate(conn); ingest.ingest_builds(conn); ingest.register_gates(conn)
+    hooks._conn = lambda: conn
+    readme = ("| `corpus_mesh.cpp [root]` | The gate. Last run: 1663 files, "
+              "3293 pass, 1 fail, 43 refused. |\n"
+              "| `vmscorpus.py` | 67 compiled, 50 rejected, 0 failed |")
+    rc, out = call_inproc(hooks.post_tool_use, {
+        "tool_input": {"command": 'grep -n "corpus_mesh" tools/README.md'},
+        "tool_response": {"stdout": readme}})
+    check(out is None, f"a grep must produce no output, got {out}")
+    n = conn.execute("SELECT COUNT(*) FROM gate_run").fetchone()[0]
+    check(n == 0, f"a grep must record no gate run, got {n}")
+    return "the README grep records nothing and says nothing"
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
