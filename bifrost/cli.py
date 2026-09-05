@@ -12,6 +12,7 @@ confirming its own proposals.
     python -m bifrost query <view>       any view, as a table or json
     python -m bifrost run <gate> [file]  ingest a gate run from stdout or a log
     python -m bifrost link               attach claims to formats, link evidence
+    python -m bifrost dump / restore     the knowledge layer as committable JSONL
     python -m bifrost review             confirm or reject proposals
     python -m bifrost test               run both test suites
 """
@@ -24,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import core, digest, ingest, seed as seed_mod
+from . import core, digest, dump as dump_mod, ingest, seed as seed_mod
 
 # Views an agent or a person may query by name. A fixed list rather than raw SQL:
 # the point of a typed surface is that a caller cannot ask for something the
@@ -260,6 +261,20 @@ def cmd_review(conn, args):
     return 0
 
 
+def cmd_dump(conn, args):
+    """Write the hand-written knowledge layer out as committable JSONL."""
+    if not dump_mod.verify(conn):
+        print("[ERROR] the dump is not deterministic; refusing to write")
+        return 1
+    dump_mod.dump(conn)
+    return 0
+
+
+def cmd_restore(conn, args):
+    dump_mod.restore(conn)
+    return 0
+
+
 def cmd_link(conn, args):
     """Attach migrated claims to their formats, and link the evidence.
 
@@ -355,6 +370,10 @@ def main(argv=None) -> int:
     s = sub.add_parser("review"); s.set_defaults(fn=cmd_review)
     s.add_argument("--confirm", action="append")
     s.add_argument("--reject", action="append")
+
+    s = sub.add_parser("dump"); s.set_defaults(fn=cmd_dump)
+
+    s = sub.add_parser("restore"); s.set_defaults(fn=cmd_restore)
 
     s = sub.add_parser("link"); s.set_defaults(fn=cmd_link)
 

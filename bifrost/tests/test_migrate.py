@@ -427,6 +427,70 @@ def test_linking_is_idempotent():
     return "reattach, invariants and discriminators all converge"
 
 
+
+# --- the committable knowledge dump ----------------------------------------
+
+def test_dump_is_deterministic_and_round_trips():
+    """The database is gitignored, so the hand-written layer would otherwise live
+    in exactly one file on one machine. A backup nobody has restored is not a
+    backup, so this restores it and compares the DERIVED views, not just counts."""
+    import tempfile
+    from bifrost import dump as dump_mod
+
+    conn = fresh()
+    core.attach_symbols(conn)
+    _load(conn, ORPHAN_DOC)
+    migrate.mechanical_pass(conn, verbose=False)
+    o = migrate.orphan_assertions(conn, min_len=40)[0]
+    cid = migrate.promote_passage(conn, o["id"], "There is no per-model scale factor.",
+                                  "verified")
+    core.record_refutation(conn, refuted_claim=cid, what_killed_it="x", why_plausible="y")
+
+    d = Path(tempfile.mkdtemp())
+    dump_mod.dump(conn, d, verbose=False)
+    first = (d / "claim.jsonl").read_bytes()
+    dump_mod.dump(conn, d, verbose=False)
+    check(first == (d / "claim.jsonl").read_bytes(),
+          "the dump is not byte-stable, so its diff is meaningless")
+    check(dump_mod.verify(conn, d), "verify() disagrees with the test")
+
+    # a dump must carry no absolute paths -- it is committed and shared
+    text = (d / "claim.jsonl").read_text(encoding="utf-8")
+    check("E:/" not in text and "E:\\" not in text,
+          "the dump leaks an absolute path, which will not survive another machine")
+
+    target = fresh()
+    core.attach_symbols(target)
+    dump_mod.restore(target, d, verbose=False)
+    for table, _ in dump_mod.TABLES:
+        a = core.one(conn, f"SELECT COUNT(*) n FROM {table}")["n"]
+        b = core.one(target, f"SELECT COUNT(*) n FROM {table}")["n"]
+        check(a == b, f"{table}: {a} dumped, {b} restored")
+
+    q = "SELECT effective_status s, COUNT(*) n FROM v_claim_status GROUP BY s"
+    ra = {r["s"]: r["n"] for r in core.rows(conn, q)}
+    rb = {r["s"]: r["n"] for r in core.rows(target, q)}
+    check(ra == rb, f"derived status diverged after restore: {ra} vs {rb}")
+    return "byte-stable, no absolute paths, derived views identical after restore"
+
+
+def test_dump_covers_the_hand_written_tables():
+    """A table that holds judgement and is not in the dump is silently
+    unbacked-up, which is the failure this exists to prevent."""
+    from bifrost import dump as dump_mod
+    dumped = {t for t, _ in dump_mod.TABLES}
+    for must in ("claim", "citation", "source", "discriminator", "refutation",
+                 "tautology", "passage", "gate_invariant", "format_field",
+                 "migration_source", "migration_para"):
+        check(must in dumped, f"{must} holds hand-written work and is not dumped")
+    # and the derived / scanned tables must NOT be, or the dump stops being a
+    # knowledge layer and becomes a stale copy of the whole database
+    for must_not in ("tree", "file", "gate_run", "git_state", "wii_symbol", "build"):
+        check(must_not not in dumped,
+              f"{must_not} rebuilds from the profile and should not be dumped")
+    return f"{len(dumped)} tables dumped, scanned and derived ones excluded"
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

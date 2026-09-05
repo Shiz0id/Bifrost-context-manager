@@ -147,6 +147,24 @@ One blind spot, reported rather than hidden: an assertion whose evidence sits in
 them; `promote_passage()` turns one into a claim inheriting the nearest three cited blocks in
 its section.
 
+## Backing up the part that cannot be rebuilt
+
+The database is a build product: scans, symbol tables and gate runs rebuild from the profile in
+seconds. The **knowledge layer** does not — claims, citations, discriminators, refutations and
+migrated passages are hand-written judgements, and recreating them means reading the source
+document again and rewriting several hundred statements.
+
+Since the database is binary and gitignored, that work would otherwise live in one file on one
+machine.
+
+```bash
+python -m bifrost dump      # -> <project>/.bifrost/dump/*.jsonl, committable
+python -m bifrost restore   # after bootstrap + seed, on a fresh database
+```
+
+Deterministic by construction and tested as such: byte-stable across runs, carrying no absolute
+paths, and a restore reproduces the **derived views** — not just the row counts.
+
 ## Layout
 
 ```
@@ -164,8 +182,9 @@ bifrost/
   cli.py          the human surface (a superset of MCP)
   mcp_server.py   dependency-free JSON-RPC over stdio
   hooks.py        SessionStart / PreToolUse / PostToolUse / Stop
+  dump.py         the knowledge layer as committable JSONL
   migrations/     numbered SQL, applied in order
-  tests/          72 tests across five suites
+  tests/          74 tests across five suites
 bifrost_server.py cwd-independent MCP launcher
 ```
 

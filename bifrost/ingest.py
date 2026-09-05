@@ -396,7 +396,7 @@ def bootstrap(conn: sqlite3.Connection, *, scan: bool = True,
 
     try:
         stats["symbols_wii"] = ingest_wii_symbols(conn)
-        log(f"[SUCCESS] Wii symbols: {stats['symbols_wii']} from {WII_MAP.name}")
+        log(f"[SUCCESS] Wii symbols: {stats['symbols_wii']} from {wii_map().name}")
     except BifrostError as e:
         stats["symbols_wii"] = 0
         log(f"[ERROR] {e}")
