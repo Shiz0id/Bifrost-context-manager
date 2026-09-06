@@ -50,6 +50,40 @@ QUERYABLE = {
 }
 
 
+# Bifrost's own checkout. Never a project root: it has no `.bifrost/`, so
+# find_root() falls through to the working directory and hands back a
+# build/bifrost.db that migrate() then fills with a complete, empty schema.
+BIFROST_REPO = Path(__file__).resolve().parent.parent
+
+# Commands allowed to see an empty database -- they are how one stops being
+# empty. For every other command zero formats means the wrong file was opened,
+# and `(no rows)` is indistinguishable from "the project knows nothing".
+EMPTY_DB_OK = {"bootstrap", "seed", "restore", "migrate", "test"}
+
+
+def _empty_db_error(conn, args) -> str | None:
+    """The message to print if this command needs a database that has content."""
+    if args.cmd in EMPTY_DB_OK:
+        return None
+    if conn.execute("select count(*) from format").fetchone()[0]:
+        return None
+    from . import profile
+    db = (Path(args.db) if args.db else core.default_db()).resolve()
+    root = profile.load().root
+    out = [f"[ERROR] no formats in {db}",
+           "        The schema is present but the knowledge layer is empty, so this is"
+           " almost certainly not the database you meant."]
+    if root == BIFROST_REPO:
+        out.append(f"        The project root resolved to Bifrost's own checkout ({root}),")
+        out.append("        which is never a project -- BIFROST_PROJECT is unset.")
+    else:
+        out.append(f"        The project root resolved to {root}.")
+    out += ["        Set it to the project directory:",
+            "            export BIFROST_PROJECT=E:/Project",
+            "        Run `bifrost bootstrap` instead if this project really is new."]
+    return "\n".join(out)
+
+
 def _table(rows: list[dict], max_width: int = 60) -> str:
     if not rows:
         return "(no rows)"
@@ -395,6 +429,10 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     conn = core.connect(args.db)
     core.migrate(conn)
+    err = _empty_db_error(conn, args)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
     core.attach_symbols(conn)
     return args.fn(conn, args)
 
