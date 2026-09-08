@@ -79,6 +79,25 @@ TOOLS = [
             "limit": {"type": "integer", "default": 12}}},
     },
     {
+        "name": "bifrost_search",
+        "description": (
+            "Full-text across everything holding prose: claim statements AND their citation "
+            "locators, the project's own code comments, format summaries, todos, and resolved "
+            "symbol names. Use it for any question of the shape 'what do we know about X' -- "
+            "realm needs a name you already have and query needs a view, so without this the "
+            "only route was dumping every claim and grepping it, which costs ~48,000 tokens to "
+            "find three rows. Hits come back COMPACT (id, label, snippet) by design; follow up "
+            "with bifrost_realm or bifrost_query once you know which row you want."),
+        "inputSchema": {"type": "object", "properties": {
+            "query": _str("words, an address, or a dotted field name -- "
+                          "'decals', '0x825ae690', 'obdef_s.numParts'"),
+            "kind": {"type": "string",
+                     "enum": ["claim", "comment", "format", "todo", "source"],
+                     "description": "narrow to one kind of row"},
+            "limit": {"type": "integer", "default": 20}},
+            "required": ["query"]},
+    },
+    {
         "name": "bifrost_realm",
         "description": (
             "Everything known about one format, tree or capability: derived status and why, "
@@ -153,12 +172,23 @@ TOOLS = [
             "citation -- that is AGENTS.md rule 6 enforced here rather than left to discipline. "
             "asserted_status is only what you claim: an unbacked 'verified' is downgraded to "
             "'asserted-unbacked' until a passing gate invariant or a discriminator backs it. "
-            "Use 'assumed' for something believed but untested."),
+            "Use 'assumed' for something believed but untested. Note what the downgrade does "
+            "NOT do: it fires on ABSENT evidence, not weak evidence, so a 'verified' with one "
+            "thin citation is taken at your word and surfaces later in `query risk`. That list "
+            "is the real quality gate, so asserting 'verified' is a claim about your evidence, "
+            "not a formality. "
+            "SET layer='divergence' when the claim is about where OUR reimplementation departs "
+            "from the retail engine rather than about the engine itself -- 'the viewer binds "
+            "only seven slot names' is a fact about us, not about the format, and a reader "
+            "asking what the retail engine does should not get it back."),
         "inputSchema": {"type": "object", "properties": {
             "format": _str("the format this is about"),
             "statement": _str("one checkable assertion"),
             "asserted_status": {"type": "string", "enum": ["assumed", "plausible", "verified"],
                                 "default": "plausible"},
+            "layer": {"type": "string", "enum": ["retail", "divergence"], "default": "retail",
+                      "description": "retail: how the shipped game works. divergence: where "
+                                     "our reimplementation differs from it."},
             "citations": {"type": "array", "items": CITATION_SCHEMA, "minItems": 1},
             "roadmap_anchor": _str("e.g. 6.13")},
             "required": ["format", "statement", "citations"]},
@@ -247,6 +277,13 @@ def call_tool(name: str, args: dict) -> Any:
             raise BifrostError(f"unknown view {args['view']!r}")
         return core.rows(c, f"SELECT * FROM {view} LIMIT ?", (args.get("limit", 50),))
 
+    if name == "bifrost_search":
+        from . import search as search_mod
+        if not core.one(c, "SELECT 1 n FROM search_index LIMIT 1"):
+            search_mod.reindex(c)
+        return {"hits": search_mod.search(c, args["query"], kind=args.get("kind"),
+                                          limit=args.get("limit", 20))}
+
     if name == "bifrost_symbol":
         out: dict = {}
         if args.get("addr"):
@@ -316,9 +353,19 @@ def call_tool(name: str, args: dict) -> Any:
             c, subject_type="format", subject_id=fid, statement=args["statement"],
             citations=args["citations"],
             asserted_status=args.get("asserted_status", "plausible"),
-            created_by="agent", roadmap_anchor=args.get("roadmap_anchor"))
-        return core.one(c, "SELECT id, effective_status, n_citations FROM v_claim_status "
-                           "WHERE id=?", (cid,))
+            created_by="agent", roadmap_anchor=args.get("roadmap_anchor"),
+            layer=args.get("layer", "retail"))
+        out = core.one(c, "SELECT id, effective_status, layer, n_citations, n_code_read "
+                          "FROM v_claim_status WHERE id=?", (cid,))
+        # The downgrade fires on absent evidence, not thin evidence. Say so at
+        # the moment of writing, where it can still be reconsidered, rather than
+        # leaving `query risk` to be the first thing that mentions it.
+        risk = core.one(c, "SELECT severity, risk FROM v_claim_risk WHERE id=?", (cid,))
+        if risk:
+            out["at_risk"] = f"[{risk['severity']}] {risk['risk']}"
+            out["note"] = ("This claim is already on `query risk`. Nothing blocked the write -- "
+                           "that list is where the status gets challenged.")
+        return out
 
     if name == "bifrost_record_evidence":
         k = args["kind"]

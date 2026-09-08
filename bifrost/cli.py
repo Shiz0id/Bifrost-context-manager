@@ -7,6 +7,7 @@ incapable of confirming its own proposals or declaring its own work done.
     python -m bifrost bootstrap          scan, ingest symbols, register gates
     python -m bifrost seed               the mutable core (formats, capabilities)
     python -m bifrost digest             whole-project state, for a session start
+    python -m bifrost search <text>      full-text across claims, comments, formats
     python -m bifrost realm <name>       everything known about one subject
     python -m bifrost trace <type> <id>  closure: what blocks what, what cites what
     python -m bifrost query <view>       any view, as a table or json
@@ -72,6 +73,26 @@ EMPTY_DB_OK = {"bootstrap", "seed", "restore", "migrate", "test"}
 # half-way through and left that database with no discriminator table, which is
 # not a thing running tests should be able to do.
 NO_DB = {"test"}
+
+# Roughly four characters a token, and a view is worth warning about long
+# before it fills a context window.
+BUDGET_CHARS = 40_000
+
+# Enough to recognise a claim, not enough to read it.
+COMPACT_TEXT = 110
+
+# What a row is FOR, when you are triaging rather than reading. `query claims
+# --limit 300` returned 193 KB because seventeen columns times 280 rows is a
+# budget, not a page.
+COMPACT = {
+    "v_claim_status": ["id", "effective_status", "layer", "statement"],
+    "v_claim_risk":   ["id", "severity", "risk", "statement"],
+    "v_gate_latest":  ["name", "ok", "pass", "fail", "finding", "ts"],
+    "v_format_status":["name", "status", "tree", "n_gates", "n_passing"],
+    "v_code_comment": ["id", "path", "line", "n_citations", "stale"],
+    "source":         ["id", "kind", "locator", "symbol"],
+    "todo":           ["id", "status", "priority", "difficulty", "title"],
+}
 
 
 def _empty_db_error(conn, args) -> str | None:
@@ -272,7 +293,24 @@ def cmd_query(conn, args):
     if not view:
         print(f"[ERROR] unknown view {args.view!r}. Known: {', '.join(sorted(QUERYABLE))}")
         return 1
-    sql, params = f"SELECT * FROM {view}", []
+    cols_available = [d[0] for d in conn.execute(f"SELECT * FROM {view} LIMIT 0").description]
+    if args.fields:
+        want = [f.strip() for f in args.fields.split(",") if f.strip()]
+        if bad := [f for f in want if f not in cols_available]:
+            print(f"[ERROR] no such column(s): {', '.join(bad)}. "
+                  f"In this view: {', '.join(cols_available)}")
+            return 1
+        select = ", ".join(f'"{f}"' for f in want)
+    elif args.compact and view in COMPACT:
+        select = ", ".join(f'"{f}"' for f in COMPACT[view] if f in cols_available)
+    else:
+        select = "*"
+
+    sql, params = f"SELECT {select} FROM {view}", []
+    if args.layer:
+        if "layer" not in cols_available:
+            print(f"[ERROR] view {args.view!r} has no layer column")
+            return 1
     if args.severity:
         # v_claim_risk is 165 rows of which 158 are the low-severity "no gate
         # invariant" (rule 4) exposure, so the handful that need a decision are
@@ -290,8 +328,29 @@ def cmd_query(conn, args):
             return 1
         sql += " WHERE severity IN (%s)" % ",".join("?" * len(wanted))
         params += wanted
+    if args.layer:
+        sql += (" AND " if params else " WHERE ") + "layer = ?"
+        params.append(args.layer)
     rows = core.rows(conn, sql + " LIMIT ?", (*params, args.limit))
-    print(json.dumps(rows, indent=2) if args.json else _table(rows))
+
+    # Choosing the columns is only half of it: a claim statement averages 217
+    # characters, so 280 of them is 60 KB of prose whatever else is trimmed.
+    # Compact is for deciding WHICH row you want; `realm` reads it in full.
+    if args.compact:
+        rows = [{k: (v[:COMPACT_TEXT - 1] + "…"
+                     if isinstance(v, str) and len(v) > COMPACT_TEXT else v)
+                 for k, v in r.items()} for r in rows]
+
+    out = json.dumps(rows, indent=2) if args.json else _table(rows)
+
+    # A caller asking for 300 claims got 193 KB -- about 48,000 tokens -- because
+    # the limit counts ROWS and a budget is spent in tokens. Say so, and say what
+    # to do about it, rather than letting it land in someone's context.
+    if len(out) > BUDGET_CHARS and not args.fields and not args.compact:
+        print(f"[WARNING] this is {len(out):,} chars, roughly {len(out)//4:,} tokens. "
+              f"--compact or --fields id,statement trims it; --limit bounds rows, not size.",
+              file=sys.stderr)
+    print(out)
     return 0
 
 
@@ -343,6 +402,32 @@ def cmd_review(conn, args):
         decision = "confirmed" if spec in (args.confirm or []) else "rejected"
         core.review(conn, kind, int(rid), decision)
         print(f"[SUCCESS] {kind} #{rid} {decision}")
+    return 0
+
+
+def cmd_search(conn, args):
+    """Ask a question you do not already know the answer to."""
+    from . import search as search_mod
+
+    if args.reindex:
+        n = search_mod.reindex(conn)
+        print(f"[SUCCESS] indexed {n['total']} rows: "
+              + ", ".join(f"{k} {v}" for k, v in n.items() if k != "total"))
+        if not args.query:
+            return 0
+
+    if not core.one(conn, "SELECT 1 n FROM search_index LIMIT 1"):
+        search_mod.reindex(conn)
+
+    hits = search_mod.search(conn, args.query, kind=args.kind, limit=args.limit)
+    if not hits:
+        print(f"(nothing matches {args.query!r})")
+        return 0
+    for h in hits:
+        print(f"{h['kind']:<8} {h['ref']:<6} {h['title'][:46]:<46} [{h['extra'] or ''}]")
+        if h["snippet"]:
+            print(f"         {h['snippet']}")
+    print(f"\n{len(hits)} hits. `realm`, `query` or `comments` for the full row.")
     return 0
 
 
@@ -556,6 +641,12 @@ def main(argv=None) -> int:
     s.add_argument("--json", action="store_true")
     s.add_argument("--severity", metavar="high,medium",
                    help="comma-separated, for views that carry a severity")
+    s.add_argument("--compact", action="store_true",
+                   help="the columns you triage on, not every column")
+    s.add_argument("--fields", metavar="id,statement",
+                   help="exactly these columns")
+    s.add_argument("--layer", choices=["retail", "divergence"],
+                   help="retail: how the shipped game works. divergence: where ours differs")
 
     s = sub.add_parser("run"); s.set_defaults(fn=cmd_run)
     s.add_argument("gate")
@@ -573,6 +664,12 @@ def main(argv=None) -> int:
     s = sub.add_parser("review"); s.set_defaults(fn=cmd_review)
     s.add_argument("--confirm", action="append")
     s.add_argument("--reject", action="append")
+
+    s = sub.add_parser("search"); s.set_defaults(fn=cmd_search)
+    s.add_argument("query", nargs="?", default="")
+    s.add_argument("--kind", choices=["claim", "comment", "format", "todo", "source"])
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--reindex", action="store_true")
 
     s = sub.add_parser("comments"); s.set_defaults(fn=cmd_comments)
     s.add_argument("locator", nargs="?", help="an address or field; show what explains it")

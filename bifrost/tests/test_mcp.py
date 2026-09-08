@@ -61,7 +61,13 @@ def test_initialize():
 def test_tools_list_is_well_formed():
     setup_server()
     tools = rpc("tools/list")["result"]["tools"]
-    check(len(tools) == 9, f"expected 9 tools, got {len(tools)}")
+    # Derived, not hardcoded: adding a tool must not break this test, the same
+    # way adding a migration does not break test_migrations_apply.
+    from bifrost import mcp_server
+    check(len(tools) == len(mcp_server.TOOLS),
+          f"tools/list returned {len(tools)}, TOOLS defines {len(mcp_server.TOOLS)}")
+    check({t["name"] for t in tools} == {t["name"] for t in mcp_server.TOOLS},
+          "tools/list must return exactly what TOOLS defines")
     for t in tools:
         check(t["name"].startswith("bifrost_"), t["name"])
         check(len(t["description"]) > 60, f"{t['name']}: description too thin for a model to route on")

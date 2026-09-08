@@ -57,7 +57,17 @@ SOURCE_KINDS = {
     # our own note is not evidence for itself -- but a claim can finally point
     # at the code that embodies it, which nothing could express before.
     "source_comment",
+    # A range in OUR code -- "src/SelotapeD3D11.cpp:3666-3698". Distinct from
+    # source_comment (a comment block) and emphatically not shipped_file, which
+    # is where one landed for want of anywhere better: it is neither shipped nor
+    # theirs. ensure_source pins it to a commit, because a line range that
+    # nothing anchors rots the next time somebody edits the function.
+    "source_ref",
 }
+
+# Kinds whose locator names a path in this repository, and therefore decays
+# unless it is pinned to a commit.
+PATH_KINDS = {"source_comment", "source_ref"}
 
 EDGE_KINDS = {
     "gates", "unlocks", "verified_by", "read_from", "implements",
@@ -227,10 +237,19 @@ def pdb_field(conn: sqlite3.Connection, struct: str, field: str) -> Optional[sql
 
 
 def ensure_source(conn: sqlite3.Connection, kind: str, locator: str,
-                  build: str | None = None, note: str | None = None) -> int:
-    """Get or create a source row, resolving addresses on the way in."""
+                  build: str | None = None, note: str | None = None,
+                  pinned_commit: str | None = None) -> int:
+    """Get or create a source row, resolving addresses on the way in.
+
+    A locator naming a path in this repository is pinned to a commit, defaulting
+    to HEAD. An address in the retail image is fixed forever; "Foo.cpp:3666-3698"
+    is true only of one revision, and unpinned it quietly becomes a lie the next
+    time somebody edits that function.
+    """
     if kind not in SOURCE_KINDS:
         raise BifrostError(f"unknown source kind {kind!r}; expected one of {sorted(SOURCE_KINDS)}")
+    if kind in PATH_KINDS and pinned_commit is None:
+        pinned_commit = head_commit()
 
     build_id = None
     if build:
@@ -253,9 +272,9 @@ def ensure_source(conn: sqlite3.Connection, kind: str, locator: str,
 
     cur = conn.execute(
         """INSERT INTO source(kind, locator, build_id, symbol, containing_symbol,
-                              offset_in_symbol, note)
-           VALUES (?,?,?,?,?,?,?)""",
-        (kind, locator, build_id, symbol, containing, offset, note),
+                              offset_in_symbol, note, pinned_commit)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (kind, locator, build_id, symbol, containing, offset, note, pinned_commit),
     )
     return int(cur.lastrowid)
 
@@ -274,7 +293,8 @@ def classify_address(va: int) -> str:
 def record_claim(conn: sqlite3.Connection, *, subject_type: str, subject_id: int | None,
                  statement: str, citations: Sequence[dict],
                  asserted_status: str = "plausible", created_by: str = "agent",
-                 roadmap_anchor: str | None = None, para_id: int | None = None) -> int:
+                 roadmap_anchor: str | None = None, para_id: int | None = None,
+                 layer: str = "retail") -> int:
     """Append a claim.
 
     Rejects an empty citation set. That is AGENTS.md rule 6 enforced where it can
@@ -291,13 +311,17 @@ def record_claim(conn: sqlite3.Connection, *, subject_type: str, subject_id: int
         )
     if asserted_status not in ("assumed", "plausible", "verified"):
         raise BifrostError(f"bad asserted_status {asserted_status!r}")
+    if layer not in ("retail", "divergence"):
+        raise BifrostError(
+            "layer is 'retail' (how the shipped game works) or 'divergence' (where our "
+            f"reimplementation differs from it); got {layer!r}")
 
     cur = conn.execute(
         """INSERT INTO claim(subject_type, subject_id, statement, asserted_status,
-                             created_at, created_by, roadmap_anchor, para_id)
-           VALUES (?,?,?,?,?,?,?,?)""",
+                             created_at, created_by, roadmap_anchor, para_id, layer)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
         (subject_type, subject_id, statement.strip(), asserted_status,
-         utcnow(), created_by, roadmap_anchor, para_id),
+         utcnow(), created_by, roadmap_anchor, para_id, layer),
     )
     claim_id = int(cur.lastrowid)
 

@@ -446,6 +446,92 @@ def test_a_discriminator_can_be_recorded_before_it_is_run():
     return "proposed before it is run, settled into the same row"
 
 
+def test_search_answers_a_question_you_cannot_name():
+    """"Which claims mention decals" had no verb.
+
+    realm needs a name you already have and query needs a view, so the only
+    route was dumping all 276 claims and grepping the file -- 48,000 tokens to
+    find three rows, and the most expensive gap a tester hit in a session.
+    """
+    from bifrost import search as search_mod
+    conn = fresh()
+    a = core.record_claim(
+        conn, subject_type="format", subject_id=None,
+        statement="Decals are runtime weapon-impact effects, not authored level dressing",
+        citations=[{"kind": "disasm_fn", "locator": "0x825ae690"}])
+    core.record_claim(
+        conn, subject_type="format", subject_id=None,
+        statement="The viewer binds only seven of the attribute set's slot names",
+        layer="divergence",
+        citations=[{"kind": "measurement", "locator": "seven slots"}])
+    search_mod.reindex(conn)
+
+    hits = search_mod.search(conn, "decals")
+    check(len(hits) == 1 and hits[0]["ref"] == str(a), str(hits))
+    check("retail" in hits[0]["extra"], f"the layer must be triageable: {hits[0]['extra']}")
+
+    # A citation locator is searchable too: the address finds the claim.
+    check(search_mod.search(conn, "0x825ae690", kind="claim"), "locators are indexed")
+
+    # fts5 syntax in a bare term must not be an error. `obdef_s.flags` and a
+    # hex address are what people actually type.
+    for q in ("obdef_s.flags", "0x825ae690", "attribute set's"):
+        search_mod.search(conn, q)      # must not raise
+
+    check(search_mod.search(conn, "nothing_matches_this_xyzzy") == [], "and nothing is invented")
+    try:
+        search_mod.search(conn, "   ")
+        raise AssertionError("an empty search was accepted")
+    except BifrostError:
+        pass
+
+    # Hits are compact by design; returning whole rows recreates the problem.
+    check(set(hits[0]) == {"kind", "ref", "title", "extra", "snippet"}, str(hits[0]))
+    return "claims, comments, formats, todos and locators, in one index"
+
+
+def test_a_claim_says_whether_it_is_about_them_or_about_us():
+    """Claims 277 and 278 were filed under attribute_info and shader_db but are
+    about the viewer's divergence from them, with only prose to say so."""
+    conn = fresh()
+    r = core.record_claim(conn, subject_type="format", subject_id=None,
+                          statement="the retail engine sorts by shader pass bits",
+                          citations=[{"kind": "disasm_fn", "locator": "0x825ae690"}])
+    d = core.record_claim(conn, subject_type="format", subject_id=None,
+                          statement="the viewer's opaque/alpha split is a single bit",
+                          layer="divergence",
+                          citations=[{"kind": "disasm_fn", "locator": "0x825ae691"}])
+    check(core.one(conn, "SELECT layer FROM v_claim_status WHERE id=?", (r,))["layer"] == "retail",
+          "retail is the default")
+    check(core.one(conn, "SELECT layer FROM v_claim_status WHERE id=?",
+                   (d,))["layer"] == "divergence", "and divergence sticks")
+    try:
+        core.record_claim(conn, subject_type="format", subject_id=None, statement="x",
+                          layer="whatever",
+                          citations=[{"kind": "measurement", "locator": "y"}])
+        raise AssertionError("an unknown layer was accepted")
+    except BifrostError as e:
+        check("divergence" in str(e), str(e))
+
+
+def test_a_path_citation_is_pinned_to_a_commit():
+    """"src/SelotapeD3D11.cpp:3666-3698" rots the next time anyone edits it.
+
+    It was recorded as `shipped_file`, which is doubly wrong: not shipped, and
+    not theirs.
+    """
+    conn = fresh()
+    sid = core.ensure_source(conn, "source_ref", "src/SelotapeD3D11.cpp:3666-3698")
+    row = core.one(conn, "SELECT * FROM source WHERE id=?", (sid,))
+    check(row["pinned_commit"], "a path citation must carry the commit it was true at")
+
+    addr = core.ensure_source(conn, "disasm_fn", "0x825ae690", "bf3_360")
+    check(core.one(conn, "SELECT pinned_commit FROM source WHERE id=?",
+                   (addr,))["pinned_commit"] is None,
+          "an address in the retail image does not move, so it is not pinned")
+    return "paths pinned, addresses not"
+
+
 def test_running_the_tests_cannot_migrate_the_project_database():
     """Running a test suite must not be able to alter production.
 
