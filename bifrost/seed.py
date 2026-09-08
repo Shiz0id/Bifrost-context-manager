@@ -50,13 +50,58 @@ from .core import utcnow
 
 
 
+def validate(prof) -> list[str]:
+    """Check the profile's constrained vocabularies before any row is written.
+
+    seed() commits formats and capabilities before it reaches exceptions, so a
+    disposition the schema rejects used to surface as a raw sqlite CHECK failure
+    AFTER those were committed: a retry then started from a half-populated
+    database, and the message named a constraint rather than the profile field
+    that violated it.
+
+        sqlite3.IntegrityError: CHECK constraint failed:
+          disposition IN ('reported','refused','defect_in_shipped_data')
+
+    Reporting every problem at once matters more than failing on the first: a
+    profile is written in one sitting, and finding the second bad row only after
+    fixing the first is the slow way to do it.
+    """
+    problems = []
+
+    for e in prof.EXCEPTIONS:
+        name, disp = e[0], e[1]
+        if disp not in core.EXCEPTION_DISPOSITIONS:
+            problems.append(
+                f"EXCEPTIONS {name!r}: disposition {disp!r} is not one of "
+                f"{sorted(core.EXCEPTION_DISPOSITIONS)}")
+
+    for c in prof.CLAIMS:
+        st = c.get("status")
+        if st not in core.CLAIM_STATUSES:
+            problems.append(
+                f"CLAIMS {c.get('statement', '?')[:48]!r}: status {st!r} is not "
+                f"one of {sorted(core.CLAIM_STATUSES)}")
+        if not c.get("citations"):
+            problems.append(
+                f"CLAIMS {c.get('statement', '?')[:48]!r}: no citations, and "
+                f"record_claim rejects a claim without one")
+
+    return problems
+
+
 def seed(conn: sqlite3.Connection, verbose: bool = True) -> dict:
     log = (lambda *a: print(*a)) if verbose else (lambda *a: None)
     stats: dict = {}
 
+    prof = profile.load()
+    problems = validate(prof)
+    if problems:
+        raise core.BifrostError(
+            f"the profile has {len(problems)} problem(s) and nothing was "
+            "written:\n  " + "\n  ".join(problems))
+
     # formats
     n = 0
-    prof = profile.load()
     for name, tree, anchor, summary in prof.FORMATS:
         tid = None
         if tree:
