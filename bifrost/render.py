@@ -168,7 +168,7 @@ def render_to_file(conn: sqlite3.Connection, path: Path | None = None) -> dict:
     p.write_text(text, encoding="utf-8")
     return {"path": str(p).replace("\\", "/"), "bytes": len(text.encode("utf-8")),
             "lines": text.count("\n"), "changed": before != text,
-            "source_commit": src["commit_sha"]}
+            "source_commit": src["commit_sha"], "source_path": src["path"]}
 
 
 def render_twice_identical(conn: sqlite3.Connection) -> bool:

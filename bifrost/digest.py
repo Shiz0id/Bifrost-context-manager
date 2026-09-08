@@ -58,11 +58,17 @@ def digest_data(conn: sqlite3.Connection, *, limit: int = 12) -> dict[str, Any]:
         # Listing both put a failing corpus_res in front of every session that
         # read this digest cold, when the gate had passed.
         "recent": core.rows(conn, """
-            SELECT g.name, r.ts, r.ok, r.pass, r.fail, r.refused
+            SELECT g.name, r.ts, r.ok, r.pass, r.fail, r.refused, r.finding
             FROM gate_run r JOIN gate g ON g.id = r.gate_id
             WHERE r.id NOT IN (SELECT supersedes FROM gate_run
                                 WHERE supersedes IS NOT NULL)
             ORDER BY r.ts DESC, r.id DESC LIMIT 6"""),
+        # A check somebody realised was needed and nobody has run. This is the
+        # cheapest decisive work available at any moment, and before it had a
+        # row it lived in a gate run's prose where nothing surfaced it.
+        "open_checks": core.rows(conn, """
+            SELECT id, check_desc, predicted_a, predicted_b
+            FROM v_discriminator_open LIMIT ?""", (limit,)),
         "todos": core.rows(conn, """
             SELECT title, phase, difficulty, status FROM todo
             WHERE review_state='confirmed' AND status IN ('open','in_progress')
@@ -129,11 +135,22 @@ def render(conn: sqlite3.Connection, *, limit: int = 12) -> str:
              lambda r: f"[{r['status']}] {r['title'][:80]}"
                        + (f"  ({r['difficulty']})" if r["difficulty"] else ""))
 
+    # Three states, not two. `ok` alone read as an unqualified success on
+    # corpus_wii_anim, whose run passed and found 16.6% of re-encoded rotation
+    # channels disagreeing with the 360 tree -- the actual result of the gate,
+    # invisible on the one surface a cold session is guaranteed to read.
     _section(L, "RECENT GATE RUNS", d["recent"],
-             lambda r: (f"{'ok ' if r['ok'] else 'FAIL'} {r['name']:<20} "
+             lambda r: (f"{'FAIL' if not r['ok'] else ('ok? ' if r['finding'] else 'ok ')}"
+                        f" {r['name']:<20} "
                         f"{(r['pass'] if r['pass'] is not None else '-')!s:>7} pass  "
-                        f"{(r['fail'] if r['fail'] is not None else '-')!s:>3} fail  {r['ts'][:16]}"),
+                        f"{(r['fail'] if r['fail'] is not None else '-')!s:>3} fail  {r['ts'][:16]}"
+                        + (f"\n       FOUND: {r['finding'][:96]}" if r["finding"] else "")),
              empty="no runs recorded")
+
+    _section(L, "CHECKS WORTH RUNNING", d["open_checks"],
+             lambda r: (f"#{r['id']} {r['check_desc'][:88]}"
+                        f"\n       a: {(r['predicted_a'] or '')[:88]}"
+                        f"\n       b: {(r['predicted_b'] or '')[:88]}"))
 
     if d["unsourced"]:
         L.append(f"RULE 6: {d['unsourced']} constant(s) with no source. "

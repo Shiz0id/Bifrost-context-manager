@@ -123,13 +123,22 @@ TOOLS = [
     {
         "name": "bifrost_record_run",
         "description": (
-            "Record a corpus gate run by handing over the probe's own stdout, which is parsed "
-            "for pass/fail/refused. Failures already covered by a registered exception do not "
-            "fail the gate; unexplained ones do. Append-only, no review."),
+            "Record a corpus gate run by handing over the probe's own stdout. Counts and "
+            "metrics come from the probe's BIFROST-RESULT block; failures already covered by a "
+            "registered exception do not fail the gate, unexplained ones do. Append-only, no "
+            "review. Pass `finding` whenever the run PASSED AND FOUND SOMETHING -- a gate can "
+            "be structurally green and substantively alarming, and corpus_wii_anim is the "
+            "standing example: `ok 4694 pass 0 fail` while 16.6% of re-encoded rotation "
+            "channels disagree with the 360 tree. Without `finding` that reads as an "
+            "unqualified success on the one surface a cold session is guaranteed to read. "
+            "`todo_id` attaches the run to the open work it bears on."),
         "inputSchema": {"type": "object", "properties": {
             "gate": _str("e.g. corpus_mesh"),
             "stdout": _str("the probe's complete output"),
-            "commit": _str("commit the run was made at; defaults to HEAD")},
+            "commit": _str("commit the run was made at; defaults to HEAD"),
+            "finding": _str("one line: it passed, and here is what it found"),
+            "note": _str("what YOU concluded, kept out of the probe's own output"),
+            "todo_id": {"type": "integer", "description": "the open work this bears on"}},
             "required": ["gate", "stdout"]},
     },
     {
@@ -155,16 +164,29 @@ TOOLS = [
             "Record evidence about existing claims. kind=discriminator for the check that "
             "SEPARATES two candidate readings, with both results -- this is the row that would "
             "have caught four of the five defects corrected on 2-4 Sep 2026, each of which "
-            "survived a gate the wrong reading also passed. kind=refutation retires a reading, "
-            "keeping why it was plausible. kind=tautology flags a check that could not have "
-            "failed, so it is never counted as evidence again."),
+            "survived a gate the wrong reading also passed. kind=discriminator_needed is the "
+            "SAME check written down BEFORE it is run, and it is the one to reach for when you "
+            "have just found something: you have an observation, two readings that would "
+            "explain it, and a cheap check that tells them apart. Do not wait until you can "
+            "fill in results -- that moment may never come, and a specific decisive next check "
+            "is the most valuable thing a session produces. State what each reading PREDICTS; "
+            "if the two predictions are the same, the check separates nothing and you have "
+            "learned that for free. kind=refutation retires a reading, keeping why it was "
+            "plausible. kind=tautology flags a check that could not have failed, so it is "
+            "never counted as evidence again."),
         "inputSchema": {"type": "object", "properties": {
-            "kind": {"type": "string", "enum": ["discriminator", "refutation", "tautology"]},
+            "kind": {"type": "string",
+                     "enum": ["discriminator", "discriminator_needed", "refutation", "tautology"]},
             "claim_id": {"type": "integer"},
             "other_claim_id": {"type": "integer", "description": "discriminator: the rival reading"},
-            "check": _str("discriminator: what was measured"),
+            "check": _str("discriminator: what was measured. discriminator_needed: what to measure"),
             "result_a": _str("discriminator: result for claim_id"),
             "result_b": _str("discriminator: result for the rival, or the control"),
+            "predicts_a": _str("discriminator_needed: what claim_id says the check will give"),
+            "predicts_b": _str("discriminator_needed: what the rival says it will give"),
+            "why_decisive": _str("discriminator_needed: why this separates them"),
+            "gate_run_id": {"type": "integer",
+                            "description": "the run that raised it, if one did"},
             "separation": _str("discriminator: how far apart they are"),
             "why_plausible": _str("refutation: why the wrong reading looked right"),
             "what_killed_it": _str("refutation: the evidence that settled it"),
@@ -259,7 +281,9 @@ def call_tool(name: str, args: dict) -> Any:
     if name == "bifrost_record_run":
         rid = ingest_mod.ingest_gate_run(
             c, args["gate"], args["stdout"], commit_sha=args.get("commit"),
-            stdout_dir=core.repo_root() / "build" / "bifrost_logs")
+            stdout_dir=core.repo_root() / "build" / "bifrost_logs",
+            finding=args.get("finding"), note=args.get("note"),
+            todo_id=args.get("todo_id"))
         row = core.one(c, "SELECT * FROM gate_run WHERE id=?", (rid,))
         return {k: row[k] for k in ("id", "ok", "pass", "fail", "refused",
                                     "tree_dirty", "metrics")}
@@ -284,6 +308,12 @@ def call_tool(name: str, args: dict) -> Any:
                 c, claim_a=args["claim_id"], claim_b=args.get("other_claim_id"),
                 check_desc=args["check"], result_a=args["result_a"],
                 result_b=args["result_b"], separation=args.get("separation"))
+        elif k == "discriminator_needed":
+            eid = core.propose_discriminator(
+                c, claim_a=args["claim_id"], claim_b=args.get("other_claim_id"),
+                check_desc=args["check"], predicted_a=args["predicts_a"],
+                predicted_b=args["predicts_b"], why_decisive=args.get("why_decisive"),
+                gate_run_id=args.get("gate_run_id"))
         elif k == "refutation":
             eid = core.record_refutation(
                 c, refuted_claim=args["claim_id"],

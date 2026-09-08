@@ -328,6 +328,70 @@ def record_discriminator(conn: sqlite3.Connection, *, claim_a: int, claim_b: int
     return int(cur.lastrowid)
 
 
+def propose_discriminator(conn: sqlite3.Connection, *, claim_a: int,
+                          claim_b: int | None, check_desc: str,
+                          predicted_a: str, predicted_b: str,
+                          why_decisive: str | None = None,
+                          gate_run_id: int | None = None,
+                          proposed_by: str = "agent") -> int:
+    """The check that WOULD separate two readings, recorded before it is run.
+
+    record_discriminator() needs both results, which means it can only be called
+    once the question is already settled. But the moment you most want a
+    discriminator captured is the moment you realise one is needed: you have the
+    observation, you have two readings that would explain it, and you have a
+    cheap check that tells them apart -- and no results, because not having run
+    it is the entire point. Without this verb that moment goes into prose, and a
+    specific decisive next check is the most valuable thing a session produces.
+
+    The predictions are what make this a discriminator rather than a to-do: a
+    check whose two readings predict the SAME outcome separates nothing, and
+    writing both down is what forces that question before the work is spent.
+
+    Fill it in later with settle_discriminator().
+    """
+    if not check_desc.strip():
+        raise BifrostError("a proposed discriminator needs to say what to check")
+    if not predicted_a.strip() or not predicted_b.strip():
+        raise BifrostError(
+            "a proposed discriminator needs both predictions -- what each reading says "
+            "the check will give. If they are the same, the check separates nothing")
+    cur = conn.execute(
+        """INSERT INTO discriminator(claim_a, claim_b, check_desc, predicted_a, predicted_b,
+                                     why_decisive, gate_run_id, proposed_by, proposed_at,
+                                     created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (claim_a, claim_b, check_desc.strip(), predicted_a.strip(), predicted_b.strip(),
+         why_decisive, gate_run_id, proposed_by, utcnow(), utcnow()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def settle_discriminator(conn: sqlite3.Connection, disc_id: int, *,
+                         result_a: str, result_b: str,
+                         separation: str | None = None,
+                         gate_run_id: int | None = None) -> dict:
+    """Run a proposed discriminator: same row, predictions now beside results.
+
+    Keeping it in one row is the point. What a reading predicted before the
+    check, next to what the check gave, is the record of whether the reasoning
+    was any good -- and that is lost the moment these become two rows.
+    """
+    row = one(conn, "SELECT * FROM discriminator WHERE id=?", (disc_id,))
+    if row is None:
+        raise BifrostError(f"no discriminator #{disc_id}")
+    if row["result_a"] is not None:
+        raise BifrostError(f"discriminator #{disc_id} was already run")
+    conn.execute(
+        """UPDATE discriminator SET result_a=?, result_b=?, separation=?,
+                                    gate_run_id=COALESCE(?, gate_run_id)
+           WHERE id=?""",
+        (result_a, result_b, separation, gate_run_id, disc_id))
+    conn.commit()
+    return one(conn, "SELECT * FROM discriminator WHERE id=?", (disc_id,))
+
+
 def record_refutation(conn: sqlite3.Connection, *, refuted_claim: int,
                       what_killed_it: str, why_plausible: str | None = None,
                       by_claim: int | None = None,

@@ -285,6 +285,41 @@ def test_supersede_retracts_a_misparse_without_unsaying_it():
     return "the row stays, the views stop counting it"
 
 
+def test_a_run_can_pass_and_still_have_found_something():
+    """`ok` is binary; the interesting state is a third thing.
+
+    corpus_wii_anim reads `ok 4694 pass 0 fail` while 16.6% of its re-encoded
+    rotation channels disagree with the same animation in the 360 tree. The gate
+    passed on its own terms and found something anyway, and the digest -- the
+    one surface a cold session is guaranteed to read -- showed only the pass.
+    """
+    conn = fresh()
+    tid = core.propose(conn, "todo", {"title": "Wii animation: the disagreeing channels"})
+    core.review(conn, "todo", tid, "confirmed")
+
+    rid = ingest.ingest_gate_run(
+        conn, "corpus_wii_anim", "4694 pass, 0 fail", commit_sha="a", tree_dirty=False,
+        finding="16.6% of re-encoded rotation channels disagree with the 360 tree",
+        todo_id=tid)
+    row = core.one(conn, "SELECT * FROM gate_run WHERE id=?", (rid,))
+    check(row["ok"] == 1, "it passed structurally")
+    check("16.6%" in row["finding"], str(row["finding"]))
+    check(row["todo_id"] == tid, "and it is attached to the work it bears on")
+
+    # The point of the column: the digest must not read as an unqualified pass.
+    text = digest.render(conn)
+    check("ok?" in text, "a qualified pass must be marked in the digest")
+    check("16.6%" in text, "and the finding itself must be on the digest")
+
+    try:
+        ingest.ingest_gate_run(conn, "corpus_wii_anim", "1 pass, 0 fail", todo_id=9999,
+                               commit_sha="a", tree_dirty=False)
+        raise AssertionError("a run attached to a todo that does not exist was accepted")
+    except BifrostError:
+        pass
+    return "passed, and found something -- visible where people actually look"
+
+
 def test_note_keeps_interpretation_out_of_stdout():
     conn = fresh()
     rid = ingest.ingest_gate_run(

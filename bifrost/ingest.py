@@ -428,7 +428,8 @@ def parse_gate_stdout(name: str, text: str) -> dict:
 def ingest_gate_run(conn: sqlite3.Connection, gate_name: str, stdout: str,
                     *, commit_sha: str | None = None, tree_dirty: bool | None = None,
                     stdout_dir: Path | None = None, note: str | None = None,
-                    supersedes: int | None = None) -> int:
+                    supersedes: int | None = None, finding: str | None = None,
+                    todo_id: int | None = None) -> int:
     """Record one gate run.
 
     stdout is written to disk and only its head kept in-row: agents querying runs
@@ -438,10 +439,18 @@ def ingest_gate_run(conn: sqlite3.Connection, gate_name: str, stdout: str,
     `note` is for what a person concluded, kept out of stdout so that the probe's
     own bytes stay the probe's own bytes. `supersedes` retracts an earlier run
     that was a recording error rather than a result -- see migration 008.
+
+    `finding` is the third state of a run: it PASSED and it FOUND SOMETHING. The
+    digest renders it, because `ok` alone reads as an unqualified success and
+    the digest is trusted precisely because people skip reading anything else.
+    `todo_id` attaches the run to the open work it bears on.
     """
     gid = core.get_id(conn, "gate", gate_name)
     if gid is None:
         raise BifrostError(f"unknown gate {gate_name!r}; run register_gates first")
+
+    if todo_id is not None and core.one(conn, "SELECT id FROM todo WHERE id=?", (todo_id,)) is None:
+        raise BifrostError(f"no todo #{todo_id} to attach this run to")
 
     if supersedes is not None:
         prior = core.one(conn, "SELECT gate_id FROM gate_run WHERE id=?", (supersedes,))
@@ -514,12 +523,12 @@ def ingest_gate_run(conn: sqlite3.Connection, gate_name: str, stdout: str,
     cur = conn.execute(
         """INSERT INTO gate_run(gate_id, ts, commit_sha, tree_dirty, ok, pass, fail,
                                 refused, metrics, stdout_path, stdout_head,
-                                note, supersedes)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                note, supersedes, finding, todo_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (gid, utcnow(), commit_sha, 1 if tree_dirty else 0, parsed["ok"],
          parsed["pass"], parsed["fail"], parsed["refused"],
          json.dumps(parsed["metrics"], sort_keys=True), stdout_path, head,
-         note, supersedes),
+         note, supersedes, finding, todo_id),
     )
     conn.commit()
 

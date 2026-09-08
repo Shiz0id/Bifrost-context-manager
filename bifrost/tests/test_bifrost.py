@@ -398,6 +398,81 @@ def test_close_todo_requires_confirmation_and_drops_out_of_the_digest():
         pass
 
 
+def test_a_discriminator_can_be_recorded_before_it_is_run():
+    """The moment you realise a check is needed had no verb.
+
+    record_discriminator needs both results, so it can only be called once the
+    question is settled -- while the moment worth capturing is the one where you
+    have an observation, two readings and a cheap decisive check, and no results
+    at all. Before this, that went into a gate run's prose and nothing surfaced
+    it.
+    """
+    conn = fresh()
+    a = seed_claim(conn, "the second mode is the cloth rigs")
+    b = seed_claim(conn, "the second mode is a permutation error")
+
+    try:
+        core.propose_discriminator(conn, claim_a=a, claim_b=b,
+                                   check_desc="compare the joint hashes",
+                                   predicted_a="", predicted_b="cloth only")
+        raise AssertionError("a proposal with no prediction was accepted")
+    except BifrostError as e:
+        check("prediction" in str(e), str(e))
+
+    did = core.propose_discriminator(
+        conn, claim_a=a, claim_b=b,
+        check_desc="group the ~90 deg disagreements by joint name hash",
+        predicted_a="all eight land on the same hash, which is a cloth joint",
+        predicted_b="the hashes are spread across unrelated joints",
+        why_decisive="a permutation error is indifferent to which joint it hits")
+
+    open_now = core.rows(conn, "SELECT * FROM v_discriminator_open")
+    check(len(open_now) == 1 and open_now[0]["id"] == did, str(open_now))
+    check(open_now[0]["statement_a"] == "the second mode is the cloth rigs", str(open_now[0]))
+    check("CHECKS WORTH RUNNING" in digest.render(conn), "and it must reach the digest")
+
+    # Settling keeps predictions beside results, in the same row: whether the
+    # reasoning was any good is exactly what two rows would lose.
+    row = core.settle_discriminator(conn, did, result_a="all eight on hash 0x4d3f2a",
+                                    result_b="-", separation="one hash vs eight")
+    check(row["predicted_a"] and row["result_a"], str(row))
+    check(core.rows(conn, "SELECT * FROM v_discriminator_open") == [], "and it leaves the open list")
+
+    try:
+        core.settle_discriminator(conn, did, result_a="x", result_b="y")
+        raise AssertionError("settling twice was accepted")
+    except BifrostError:
+        pass
+    return "proposed before it is run, settled into the same row"
+
+
+def test_running_the_tests_cannot_migrate_the_project_database():
+    """Running a test suite must not be able to alter production.
+
+    main() migrated before dispatching any command, so `bifrost test` opened the
+    project's database and applied pending migrations as a side effect. 009 then
+    failed part-way and left that database with no discriminator table. Nothing
+    about running tests suggests it will touch real data.
+    """
+    from bifrost import cli
+    check("test" in cli.NO_DB, "the test command must not open the project database")
+    src = (Path(cli.__file__)).read_text(encoding="utf-8")
+    i, j = src.index("args = p.parse_args(argv)"), src.index("conn = core.connect(args.db)")
+    check("NO_DB" in src[i:j], "the NO_DB check must come before connect(), not after")
+
+
+def test_gate_view_says_where_the_probe_lives():
+    """corpus_m0v's gate is a Python script, not the C++ probe of the same name.
+
+    Finding that out meant grepping the project profile, after building and
+    running the wrong one. Both paths were in `gate` and in no view.
+    """
+    conn = fresh()
+    cols = [d[0] for d in conn.execute("SELECT * FROM v_gate_latest LIMIT 0").description]
+    for c in ("probe_path", "exe_path", "finding", "todo_id"):
+        check(c in cols, f"v_gate_latest should carry {c}: {cols}")
+
+
 def test_close_is_not_on_the_mcp_surface():
     """The whole point: an agent cannot mark its own work done."""
     from bifrost import mcp_server

@@ -14,6 +14,7 @@ incapable of confirming its own proposals or declaring its own work done.
     python -m bifrost link               attach claims to formats, link evidence
     python -m bifrost dump / restore     the knowledge layer as committable JSONL
     python -m bifrost review             confirm or reject proposals
+    python -m bifrost check              propose / list / settle a discriminator
     python -m bifrost close <id>...      close a todo: done, or abandoned
     python -m bifrost test               run both test suites
 """
@@ -47,6 +48,7 @@ QUERYABLE = {
     "trees": "tree",
     "exceptions": "exception",
     "todos": "todo",
+    "open_checks": "v_discriminator_open",
     "sources": "source",
 }
 
@@ -60,6 +62,14 @@ BIFROST_REPO = Path(__file__).resolve().parent.parent
 # empty. For every other command zero formats means the wrong file was opened,
 # and `(no rows)` is indistinguishable from "the project knows nothing".
 EMPTY_DB_OK = {"bootstrap", "seed", "restore", "migrate", "test"}
+
+# Commands that must not open the project's database at all. `test` runs the
+# suites in subprocesses against their own temporary databases and never touches
+# this connection -- but main() migrates before dispatching, so running the test
+# suite silently schema-migrated the live database. Migration 009 then failed
+# half-way through and left that database with no discriminator table, which is
+# not a thing running tests should be able to do.
+NO_DB = {"test"}
 
 
 def _empty_db_error(conn, args) -> str | None:
@@ -288,7 +298,8 @@ def cmd_run(conn, args):
     try:
         rid = ingest.ingest_gate_run(conn, args.gate, text,
                                      stdout_dir=core.repo_root() / "build" / "bifrost_logs",
-                                     note=args.note, supersedes=args.supersedes)
+                                     note=args.note, supersedes=args.supersedes,
+                                     finding=args.finding, todo_id=args.todo)
     except core.BifrostError as e:
         # Most often: the wrong thing got piped in. Nothing was written.
         print(f"[ERROR] {e}")
@@ -303,6 +314,13 @@ def cmd_run(conn, args):
     if row["supersedes"]:
         print(f"[INFO] run #{rid} supersedes #{row['supersedes']}, which the views "
               f"and the digest now skip")
+    if row["finding"]:
+        print(f"[FOUND] {row['finding']}")
+        if not row["todo_id"]:
+            print("[INFO] no --todo: this finding is attached to no open work. "
+                  "`bifrost query todos` to find the one it bears on.")
+        print("[INFO] if this finding needs a check to settle it, propose the "
+              "discriminator now: `bifrost check --claim <id> ...`")
     if not ingest.parse_gate_stdout(args.gate, text)["declared"]:
         print(f"[INFO] no BIFROST-RESULT block, so counts came from the summary line "
               f"and no metrics were recorded. See README, 'Declaring a result'.")
@@ -323,6 +341,47 @@ def cmd_review(conn, args):
         decision = "confirmed" if spec in (args.confirm or []) else "rejected"
         core.review(conn, kind, int(rid), decision)
         print(f"[SUCCESS] {kind} #{rid} {decision}")
+    return 0
+
+
+def cmd_check(conn, args):
+    """Propose a discriminator, list the open ones, or settle one with results.
+
+    The proposing half exists because record_discriminator needs both results,
+    so it can only be called once the question is settled -- while the moment
+    you most want the check written down is the moment you realise it is needed.
+    """
+    if args.settle:
+        row = core.settle_discriminator(conn, args.settle, result_a=args.result_a,
+                                        result_b=args.result_b, separation=args.separation)
+        print(f"[SUCCESS] discriminator #{row['id']} settled")
+        print(f"    predicted a: {row['predicted_a']}\n    gave        {row['result_a']}")
+        print(f"    predicted b: {row['predicted_b']}\n    gave        {row['result_b']}")
+        return 0
+
+    if args.claim is None:
+        q = core.rows(conn, "SELECT * FROM v_discriminator_open")
+        if not q:
+            print("(no open checks)")
+            return 0
+        for r in q:
+            print(f"#{r['id']}  {r['check_desc']}")
+            print(f"      a: {r['statement_a'][:80]}")
+            print(f"         predicts {r['predicted_a']}")
+            print(f"      b: {(r['statement_b'] or '(unnamed control)')[:80]}")
+            print(f"         predicts {r['predicted_b']}")
+            if r["why_decisive"]:
+                print(f"      decisive because {r['why_decisive']}")
+        print("\nSettle with:  python -m bifrost check --settle 3 "
+              "--result-a '...' --result-b '...'")
+        return 0
+
+    did = core.propose_discriminator(
+        conn, claim_a=args.claim, claim_b=args.rival, check_desc=args.check,
+        predicted_a=args.predicts_a, predicted_b=args.predicts_b,
+        why_decisive=args.why, gate_run_id=args.run, proposed_by="cli")
+    print(f"[SUCCESS] discriminator #{did} proposed; it is now in the digest "
+          f"under CHECKS WORTH RUNNING")
     return 0
 
 
@@ -410,8 +469,12 @@ def cmd_render(conn, args):
         print(rd.render(conn))
         return 0
     r = rd.render_to_file(conn)
-    print(f"[SUCCESS] {r['path']}: {r['bytes']:,} bytes, {r['lines']:,} lines "
-          f"from source commit {r['source_commit'][:7]}"
+    # Naming the document matters. This is NOT "the knowledge layer as of" that
+    # commit -- it is the commit whose bf3_execution_roadmap.md was ingested,
+    # i.e. the provenance of the migrated prose. Claims recorded since are in
+    # the render and are not covered by this sha at all.
+    print(f"[SUCCESS] {r['path']}: {r['bytes']:,} bytes, {r['lines']:,} lines; "
+          f"migrated prose came from {r['source_path']} at {r['source_commit'][:7]}"
           + ("" if r["changed"] else "  (unchanged)"))
     return 0
 
@@ -463,10 +526,28 @@ def main(argv=None) -> int:
     s.add_argument("--supersedes", type=int, metavar="RUN_ID",
                    help="retract an earlier run of this gate that was a recording "
                         "error rather than a result; the row stays, the views skip it")
+    s.add_argument("--finding",
+                   help="the run PASSED and FOUND SOMETHING -- state it in one line. "
+                        "The digest renders this; a plain ok reads as unqualified success")
+    s.add_argument("--todo", type=int, metavar="TODO_ID",
+                   help="the open work this run bears on")
 
     s = sub.add_parser("review"); s.set_defaults(fn=cmd_review)
     s.add_argument("--confirm", action="append")
     s.add_argument("--reject", action="append")
+
+    s = sub.add_parser("check"); s.set_defaults(fn=cmd_check)
+    s.add_argument("--claim", type=int, help="the reading this check would confirm")
+    s.add_argument("--rival", type=int, help="the rival reading, or omit for a control")
+    s.add_argument("--check", help="what to measure")
+    s.add_argument("--predicts-a", dest="predicts_a", help="what --claim says it will give")
+    s.add_argument("--predicts-b", dest="predicts_b", help="what --rival says it will give")
+    s.add_argument("--why", help="why this separates them")
+    s.add_argument("--run", type=int, metavar="RUN_ID", help="the gate run that raised it")
+    s.add_argument("--settle", type=int, metavar="DISC_ID", help="record the results")
+    s.add_argument("--result-a", dest="result_a")
+    s.add_argument("--result-b", dest="result_b")
+    s.add_argument("--separation")
 
     s = sub.add_parser("close"); s.set_defaults(fn=cmd_close)
     s.add_argument("id", nargs="*", type=int,
@@ -491,6 +572,9 @@ def main(argv=None) -> int:
     s = sub.add_parser("test"); s.set_defaults(fn=cmd_test)
 
     args = p.parse_args(argv)
+    if args.cmd in NO_DB:
+        return args.fn(None, args)
+
     conn = core.connect(args.db)
     core.migrate(conn)
     err = _empty_db_error(conn, args)
