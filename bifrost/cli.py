@@ -548,6 +548,22 @@ def cmd_restore(conn, args):
     return 0
 
 
+def invariant_coverage_line(gated: int, tot: int) -> str:
+    """The line `link` ends on.
+
+    Separate from cmd_link so the empty case is testable. A project with no
+    claims yet is the ordinary state of a new one -- and of any project whose
+    seed stopped early -- and reporting a percentage of nothing used to raise
+    ZeroDivisionError, which reads as a Bifrost defect rather than as "there is
+    nothing here yet".
+    """
+    if not tot:
+        return ("[INFO] no claims recorded yet, so none carry a gate invariant")
+    return (f"[INFO] {gated} of {tot} claims carry a gate invariant "
+            f"({100 * gated / tot:.0f}%); the rest are rule 4 exposure, "
+            f"reported at LOW in v_claim_risk")
+
+
 def cmd_link(conn, args):
     """Attach migrated claims to their formats, and link the evidence.
 
@@ -561,9 +577,7 @@ def cmd_link(conn, args):
 
     tot = core.one(conn, "SELECT COUNT(*) n FROM claim")["n"]
     gated = core.one(conn, "SELECT COUNT(DISTINCT claim_id) n FROM gate_invariant")["n"]
-    print(f"\n[INFO] {gated} of {tot} claims carry a gate invariant "
-          f"({100 * gated / tot:.0f}%); the rest are rule 4 exposure, reported at "
-          f"LOW in v_claim_risk")
+    print("\n" + invariant_coverage_line(gated, tot))
     return 0
 
 
