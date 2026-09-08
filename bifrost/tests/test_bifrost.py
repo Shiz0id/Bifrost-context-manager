@@ -622,7 +622,7 @@ def test_migration_coverage():
 def test_resolve_real_addresses():
     conn = fresh()
     if not core.attach_symbols(conn):
-        return "skipped: no xenon_symbols.db at %s" % core.SYMBOLS_360
+        return "skipped: no symbol database at %s" % core.symbol_db()
 
     r = core.resolve_address(conn, 0x825AE690)
     check(r.kind == "exact" and r.symbol == "obGetVertexPosHW", f"{r}")
@@ -677,6 +677,45 @@ def test_pdb_validates_field_offsets():
 
 
 # ---------------------------------------------------------------------------
+
+def test_bootstrap_without_symbol_db():
+    """A project that declares no SYMBOL_DB must still bootstrap.
+
+    core.SYMBOLS_360 never existed. bootstrap() referenced it in the ELSE branch
+    of an f-string conditional, so it was evaluated exactly when
+    attach_symbols() returned False -- which is every project without a symbol
+    database, including the "profile defining only NAME" case the README
+    documents as supported. On this project attach_symbols() succeeds, the
+    branch is never taken, and the AttributeError stayed invisible.
+    """
+    from bifrost import ingest, profile
+
+    d = Path(tempfile.mkdtemp())
+    old = os.environ.get("BIFROST_PROJECT")
+    try:
+        (d / ".bifrost").mkdir()
+        (d / ".bifrost" / "profile.py").write_text('NAME = "minimal"\n')
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(["git", "-C", str(d), "-c", "user.email=t@t",
+                        "-c", "user.name=t", "commit", "-q", "--allow-empty",
+                        "-m", "init"], check=True)
+
+        os.environ["BIFROST_PROJECT"] = str(d)
+        profile.load(force=True)
+
+        conn = core.connect(":memory:")
+        stats = ingest.bootstrap(conn, scan=False, verbose=False)
+        check(stats["builds"] == 0, "a NAME-only profile declares no builds")
+        check(not stats["symbols_360"], "a NAME-only profile has no symbol db")
+    finally:
+        if old is None:
+            os.environ.pop("BIFROST_PROJECT", None)
+        else:
+            os.environ["BIFROST_PROJECT"] = old
+        profile.load(force=True)
+        shutil.rmtree(d, ignore_errors=True)
+    return "NAME-only profile bootstraps"
+
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 

@@ -558,8 +558,16 @@ def bootstrap(conn: sqlite3.Connection, *, scan: bool = True,
     log(f"[SUCCESS] builds: {stats['builds']}")
 
     stats["symbols_360"] = core.attach_symbols(conn)
-    log(f"[{'SUCCESS' if stats['symbols_360'] else 'ERROR'}] 360 symbol database "
-        f"{'attached' if stats['symbols_360'] else 'NOT FOUND at ' + str(core.SYMBOLS_360)}")
+    declared = core.symbol_db()
+    if stats["symbols_360"]:
+        log(f"[SUCCESS] symbol database attached from {declared}")
+    elif declared is None:
+        # Not an error. A project without a symbol database is the ordinary
+        # case everywhere except this one, and the WII_MAP branch below already
+        # reports its absence this way.
+        log("[INFO] this project declares no SYMBOL_DB in its profile")
+    else:
+        log(f"[ERROR] symbol database NOT FOUND at {declared}")
 
     try:
         stats["symbols_wii"] = ingest_wii_symbols(conn)
