@@ -225,18 +225,48 @@ def register_gates(conn: sqlite3.Connection) -> int:
 # gate stdout parsing
 # ---------------------------------------------------------------------------
 
-# The probes do not share a format, but they do share an idiom: a summary line
-# carrying "<n> pass", "<n> fail" and often "<n> refused". Parsing that rather
-# than requiring a machine-readable mode means no probe has to change.
-# `[ \t]+` rather than `\s+`, because \s crosses newlines: corpus_level ends its
-# class-id histogram with a bare number on one line and a bare "PASS" on the
-# next, which \s+ read as "59 pass" and recorded as the gate's pass count.
+# A probe SAYS how it went, in a block it wrote on purpose:
+#
+#     BIFROST-RESULT-BEGIN
+#     {"pass": 1387, "fail": 0, "metrics": {"files": 1387}}
+#     BIFROST-RESULT-END
+#
+# or, equivalently, KEY=value lines inside the same markers, where pass, fail
+# and refused are reserved and every other key is a metric.
+#
+# This exists because the alternative was inference, and inference at this
+# boundary is the exact thing AGENTS.md rule 1 forbids everywhere else: never
+# infer a format, read the thing that writes it. Bifrost was scraping
+# "<number> <nearby word>" out of prose and storing the result as structured
+# data, which produced metrics like `and_all_eight: 90` and, from a paragraph
+# explaining that an earlier run was a mis-parse, `is_a_recording_artefact: 32`.
+# The system built to stop guessing was guessing at its own front door.
+_BLOCK = re.compile(
+    r"^[ \t]*BIFROST-RESULT-BEGIN[ \t]*$\n(.*?)^[ \t]*BIFROST-RESULT-END[ \t]*$",
+    re.M | re.S)
+_KV = re.compile(r"^[ \t]*([A-Za-z][A-Za-z0-9_]*)[ \t]*=[ \t]*(-?[\d,]+)[ \t]*$", re.M)
+_RESERVED = ("pass", "fail", "refused")
+
+# Legacy summary lines, for probes that have not been given a block yet. These
+# recover COUNTS ONLY -- never metrics. A number sitting near a word is not a
+# measurement of anything, and treating it as one is what this change ends.
+#
+# The colon forms are tried first and win, because the bare "<n> <label>" form
+# reads a summary backwards whenever the label follows a different number:
+# `PARSED OK: 1387   FAILED: 0` bound 1387 to fail, flipped corpus_res red, and
+# put a failing gate in front of every session that read the digest cold.
+#
+# `[ \t]+` rather than `\s+` on the bare forms, because \s crosses newlines:
+# corpus_level ends its class-id histogram with a bare number on one line and a
+# bare "PASS" on the next, which \s+ read as "59 pass".
+_PASS_C = re.compile(r"\bpass(?:ed)?[ \t]*:[ \t]*(\d[\d,]*)", re.I)
+_FAIL_C = re.compile(r"\bfail(?:ed|ures)?[ \t]*:[ \t]*(\d[\d,]*)", re.I)
+_REFUSED_C = re.compile(r"\brefused[ \t]*:[ \t]*(\d[\d,]*)", re.I)
 _PASS = re.compile(r"(\d[\d,]*)[ \t]+pass\b", re.I)
 _FAIL = re.compile(r"(\d[\d,]*)[ \t]+fail(?:ed)?\b", re.I)
 _REFUSED = re.compile(r"(\d[\d,]*)[ \t]+refused\b", re.I)
 _WALK = re.compile(r"(\d[\d,]*)[ \t]+walk\b", re.I)
 _PARSEFAIL = re.compile(r"(\d[\d,]*)[ \t]+failed to parse", re.I)
-_NUMBERED = re.compile(r"([\d,]{2,})\s+([a-z][a-z_ ]{2,30}?)(?=[,;.\n]|$)", re.I)
 
 # A verdict has to START a line. `"[PASS]" in text` also matches the literal
 # inside the probe's OWN SOURCE -- `std::cout << (pass ? "[PASS]" : "[FAIL]")`
@@ -251,16 +281,79 @@ def _num(s: str) -> int:
     return int(s.replace(",", ""))
 
 
+def parse_declared_block(text: str) -> dict | None:
+    """Read a BIFROST-RESULT block, or return None if the probe emitted none.
+
+    Raises rather than falling back when a block is present but malformed. A
+    probe that meant to declare its result and got the syntax wrong must not be
+    quietly re-read by the guesser it was written to replace -- that would put
+    the inference back exactly where it does the most damage, on output somebody
+    believed was structured.
+    """
+    blocks = _BLOCK.findall(text)
+    if not blocks:
+        return None
+    if len(blocks) > 1:
+        raise BifrostError(
+            f"{len(blocks)} BIFROST-RESULT blocks in one log; a run has one result. "
+            f"If several probes ran, ingest their outputs separately.")
+
+    body = blocks[0].strip()
+    got: dict = {"pass": None, "fail": None, "refused": None, "metrics": {}}
+
+    if body.startswith("{"):
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise BifrostError(f"BIFROST-RESULT block is not valid JSON: {e}")
+        if not isinstance(data, dict):
+            raise BifrostError("BIFROST-RESULT JSON must be an object")
+        for k in _RESERVED:
+            if data.get(k) is not None:
+                if not isinstance(data[k], int) or isinstance(data[k], bool):
+                    raise BifrostError(f"BIFROST-RESULT {k!r} must be an integer")
+                got[k] = data[k]
+        metrics = data.get("metrics", {})
+        if not isinstance(metrics, dict):
+            raise BifrostError("BIFROST-RESULT 'metrics' must be an object")
+        got["metrics"] = metrics
+    else:
+        pairs = _KV.findall(body)
+        if not pairs:
+            raise BifrostError(
+                "BIFROST-RESULT block is neither JSON nor KEY=value lines. "
+                "Emit {\"pass\": N, \"fail\": N, \"metrics\": {...}} or pass=N / fail=N.")
+        for k, v in pairs:
+            (got if k.lower() in _RESERVED else got["metrics"])[
+                k.lower() if k.lower() in _RESERVED else k] = _num(v)
+
+    if got["pass"] is None and got["fail"] is None:
+        raise BifrostError("BIFROST-RESULT block declares neither pass nor fail")
+    return got
+
+
 def parse_gate_stdout(name: str, text: str) -> dict:
     """Extract pass/fail/refused and a metrics bag from a probe's own output.
 
-    Deliberately tolerant: a gate whose summary line cannot be parsed records
-    ok=0 with a note rather than silently reporting a pass. Reporting a green
-    result for output nobody understood is exactly the failure AGENTS.md rule 7
-    is about.
+    A declared BIFROST-RESULT block is authoritative and is the only source of
+    metrics. Without one, the legacy summary regexes recover COUNTS ONLY, and
+    the run carries no metrics at all -- which is the honest result, because
+    nothing in free text was ever a declared measurement.
+
+    Deliberately tolerant about verdicts: a gate whose summary cannot be parsed
+    records ok=0 with a note rather than silently reporting a pass. Reporting a
+    green result for output nobody understood is exactly the failure AGENTS.md
+    rule 7 is about.
     """
     out: dict = {"pass": None, "fail": None, "refused": None, "metrics": {},
-                 "ok": 0, "recognised": True}
+                 "ok": 0, "recognised": True, "declared": False}
+
+    if (declared := parse_declared_block(text)) is not None:
+        out.update(declared)
+        out["declared"] = True
+        explicit_fail = bool(_VERDICT_FAIL.search(text))
+        out["ok"] = 0 if (explicit_fail or (out["fail"] or 0) > 0) else 1
+        return out
 
     tail = "\n".join(text.strip().splitlines()[-40:])
 
@@ -270,17 +363,36 @@ def parse_gate_stdout(name: str, text: str) -> dict:
     def find(rx):
         return rx.search(tail) or rx.search(text)
 
-    if (m := find(_PASS)):
-        out["pass"] = _num(m.group(1))
-    elif (m := find(_WALK)):
-        out["pass"] = _num(m.group(1))
+    # Strongest signal available without a declared block: ONE line carrying
+    # both a pass and a fail count. Those numbers were printed together and
+    # belong together, which no cross-line search can establish.
+    summary = next((ln for ln in tail.splitlines() + text.splitlines()
+                    if _PASS.search(ln) and _FAIL.search(ln)), None)
+    if summary:
+        out["pass"] = _num(_PASS.search(summary).group(1))
+        out["fail"] = _num(_FAIL.search(summary).group(1))
+        if (m := _REFUSED.search(summary)):
+            out["refused"] = _num(m.group(1))
+    else:
+        # No summary line. Now the colon forms are worth more than the bare
+        # ones, because `FAILED: 0` says which number is the failure count while
+        # `1387   FAILED` merely sits next to one -- that adjacency is what read
+        # corpus_res backwards and turned a clean gate red.
+        #
+        # The reverse is also true, which is why this ordering is conditional
+        # and not global: corpus_wii_ob prints `failures: 0 bone past the
+        # skeleton, 4 position outside its AABB`, where the colon introduces a
+        # BREAKDOWN and the real total is the 4 on its summary line. Every
+        # ordering here has a counterexample somewhere -- which is the argument
+        # for the declared block, not for a cleverer regex.
+        if (m := find(_PASS_C)) or (m := find(_PASS)) or (m := find(_WALK)):
+            out["pass"] = _num(m.group(1))
+        if (m := find(_FAIL_C)) or (m := find(_FAIL)) or (m := find(_PARSEFAIL)):
+            out["fail"] = _num(m.group(1))
 
-    if (m := find(_FAIL)):
-        out["fail"] = _num(m.group(1))
-    if (m := find(_PARSEFAIL)):
-        out["fail"] = _num(m.group(1))
-    if (m := find(_REFUSED)):
-        out["refused"] = _num(m.group(1))
+    if out["refused"] is None:
+        if (m := find(_REFUSED_C)) or (m := find(_REFUSED)):
+            out["refused"] = _num(m.group(1))
 
     # explicit verdicts win over inference
     explicit_fail = bool(_VERDICT_FAIL.search(text))
@@ -303,32 +415,46 @@ def parse_gate_stdout(name: str, text: str) -> dict:
         # is how `read_the_material_sets: 7592` got into the database, parsed
         # out of the commit subject `3dc7592 Read the material sets, ...`.
         out["recognised"] = False
-        out["metrics"]["parse_note"] = "no pass/fail summary found in the last 40 lines"
+        out["metrics"]["parse_note"] = (
+            "no BIFROST-RESULT block and no pass/fail summary in the last 40 lines")
         return out
 
-    for m in _NUMBERED.finditer(tail):
-        label = m.group(2).strip().lower().replace(" ", "_")
-        if label in ("pass", "fail", "failed", "refused"):
-            continue
-        try:
-            out["metrics"].setdefault(label, _num(m.group(1)))
-        except ValueError:
-            pass
+    # No metrics are inferred here, by design. A probe that wants metrics
+    # recorded declares them in a BIFROST-RESULT block; anything else is a
+    # number that happened to sit next to a word.
     return out
 
 
 def ingest_gate_run(conn: sqlite3.Connection, gate_name: str, stdout: str,
                     *, commit_sha: str | None = None, tree_dirty: bool | None = None,
-                    stdout_dir: Path | None = None) -> int:
+                    stdout_dir: Path | None = None, note: str | None = None,
+                    supersedes: int | None = None) -> int:
     """Record one gate run.
 
     stdout is written to disk and only its head kept in-row: agents querying runs
     want the summary, and a 200-line dump per row would bloat every digest and
     every query result.
+
+    `note` is for what a person concluded, kept out of stdout so that the probe's
+    own bytes stay the probe's own bytes. `supersedes` retracts an earlier run
+    that was a recording error rather than a result -- see migration 008.
     """
     gid = core.get_id(conn, "gate", gate_name)
     if gid is None:
         raise BifrostError(f"unknown gate {gate_name!r}; run register_gates first")
+
+    if supersedes is not None:
+        prior = core.one(conn, "SELECT gate_id FROM gate_run WHERE id=?", (supersedes,))
+        if prior is None:
+            raise BifrostError(f"no gate_run #{supersedes} to supersede")
+        if prior["gate_id"] != gid:
+            raise BifrostError(
+                f"gate_run #{supersedes} belongs to a different gate; a run can only "
+                f"supersede another run of {gate_name!r}")
+        already = core.one(conn, "SELECT id FROM gate_run WHERE supersedes=?", (supersedes,))
+        if already:
+            raise BifrostError(
+                f"gate_run #{supersedes} is already superseded by #{already['id']}")
 
     g = core.one(conn, "SELECT readers FROM gate WHERE id=?", (gid,))
     readers = json.loads(g["readers"] or "[]")
@@ -387,11 +513,13 @@ def ingest_gate_run(conn: sqlite3.Connection, gate_name: str, stdout: str,
 
     cur = conn.execute(
         """INSERT INTO gate_run(gate_id, ts, commit_sha, tree_dirty, ok, pass, fail,
-                                refused, metrics, stdout_path, stdout_head)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                                refused, metrics, stdout_path, stdout_head,
+                                note, supersedes)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (gid, utcnow(), commit_sha, 1 if tree_dirty else 0, parsed["ok"],
          parsed["pass"], parsed["fail"], parsed["refused"],
-         json.dumps(parsed["metrics"], sort_keys=True), stdout_path, head),
+         json.dumps(parsed["metrics"], sort_keys=True), stdout_path, head,
+         note, supersedes),
     )
     conn.commit()
 

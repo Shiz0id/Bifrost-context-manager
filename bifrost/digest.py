@@ -54,9 +54,14 @@ def digest_data(conn: sqlite3.Connection, *, limit: int = 12) -> dict[str, Any]:
             SELECT format, struct_name, name, offset, pdb_struct, pdb_field
             FROM v_field_pdb_conflict LIMIT ?""", (limit,)),
         "unsourced": core.one(conn, "SELECT COUNT(*) AS n FROM v_constant_unsourced")["n"],
+        # A superseded run is a recording error that was corrected, not a result.
+        # Listing both put a failing corpus_res in front of every session that
+        # read this digest cold, when the gate had passed.
         "recent": core.rows(conn, """
             SELECT g.name, r.ts, r.ok, r.pass, r.fail, r.refused
             FROM gate_run r JOIN gate g ON g.id = r.gate_id
+            WHERE r.id NOT IN (SELECT supersedes FROM gate_run
+                                WHERE supersedes IS NOT NULL)
             ORDER BY r.ts DESC, r.id DESC LIMIT 6"""),
         "todos": core.rows(conn, """
             SELECT title, phase, difficulty, status FROM todo

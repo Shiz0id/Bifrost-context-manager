@@ -116,6 +116,57 @@ python -m bifrost close 4 --status abandoned
 Only a *confirmed* todo can be closed: a proposal that should not happen is turned down with
 `review --reject`, which keeps `done` meaning the work actually happened.
 
+## Declaring a result
+
+A probe says how it went, in a block it wrote on purpose:
+
+```
+BIFROST-RESULT-BEGIN
+{"pass": 1387, "fail": 0, "refused": 0, "metrics": {"files": 1387, "decoded": 1387}}
+BIFROST-RESULT-END
+```
+
+or the same thing as `KEY=value` lines between the same markers, where `pass`, `fail` and
+`refused` are reserved and every other key is a metric:
+
+```
+BIFROST-RESULT-BEGIN
+pass=1387
+fail=0
+files=1387
+BIFROST-RESULT-END
+```
+
+**A declared block is the only source of metrics.** A probe without one still records its
+pass/fail counts, parsed from its summary line, and records no metrics at all — which is the
+honest result, because nothing in free text was ever a declared measurement.
+
+This replaced a parser that scraped `<number> <nearby word>` out of the probe's prose. It
+produced metrics like `and_all_eight: 90`, and `confirmed_by_direct_stat: 360` where the 360
+came from the path `E:/BF3_360`. A paragraph written to explain that an earlier run was a
+mis-parse was itself scraped, and landed as `is_a_recording_artefact: 32`. Worse, `PARSED OK:
+1387   FAILED: 0` bound 1387 to *fail* and turned a clean gate red, so a session reading the
+digest cold saw a failing gate that had passed.
+
+That is the project's own prime rule turned inward — never infer a format, read the thing that
+writes it — so the fix is the one that rule always implies: have the writer declare, and parse
+only what was declared. A block that is present but malformed is **refused**, never quietly
+re-read by the guesser it exists to replace.
+
+Interpretation goes beside the run, not into it:
+
+```
+python -m bifrost run corpus_wii_anim log.txt --note "bimodal by joint; the second mode is cloth"
+python -m bifrost run corpus_res log.txt --supersedes 32
+```
+
+`stdout_path` stays the probe's own bytes. `--note` is what a person concluded, and a conclusion
+worth keeping becomes a claim with a citation. `--supersedes` retracts a run that was a recording
+error rather than a result: the row stays — append-only is right for evidence, and nobody should
+be able to quietly unsay a measurement — but `v_gate_latest` and the digest stop counting it as
+the gate's state. A mis-parse is a typo in the recording, not a measurement, and before this the
+schema could not tell them apart.
+
 ## Hooks
 
 | Hook | Job |

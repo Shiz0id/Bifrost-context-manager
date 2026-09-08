@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
-from bifrost import core, ingest  # noqa: E402
+from bifrost import core, digest, ingest  # noqa: E402
 from bifrost.core import BifrostError  # noqa: E402
 
 
@@ -136,12 +136,84 @@ def test_unparseable_output_is_not_a_pass():
     check(got["ok"] == 0, "empty output must not report ok")
 
 
-def test_metrics_extracted():
+def test_no_metrics_are_inferred_from_free_text():
+    """This test used to assert the opposite, and that was the defect.
+
+    Scraping "<number> <nearby word>" out of prose produced `and_all_eight: 90`
+    and `confirmed_by_direct_stat: 360` (the 360 came from the path E:/BF3_360),
+    stored as if they were measurements. Worst of all, a paragraph written to
+    explain that an earlier run was a mis-parse was itself scraped, landing as
+    `is_a_recording_artefact: 32`.
+    """
     got = ingest.parse_gate_stdout("corpus_mesh", REAL["corpus_mesh"])
-    m = got["metrics"]
-    check(m.get("vertices") == 14021613, f"vertices: {m.get('vertices')}")
-    check(m.get("triangles") == 9777373, f"triangles: {m.get('triangles')}")
-    return "vertices and triangles pulled out of the free text"
+    check(got["metrics"] == {}, f"free text must yield no metrics, got {got['metrics']}")
+    check(got["pass"] == 3293, "counts still come from the summary line")
+
+    prose = ("corpus_wii_anim: bimodal by joint, 17063 by_joint and 1177 deg;\n"
+             "and all eight land 97 degrees apart.\n"
+             "4694 pass, 0 fail\n")
+    got = ingest.parse_gate_stdout("corpus_wii_anim", prose)
+    check(got["metrics"] == {}, f"prose is not data, got {got['metrics']}")
+    check((got["pass"], got["fail"]) == (4694, 0), str(got))
+    return "prose stays prose; counts still parse"
+
+
+def test_declared_block_is_the_only_source_of_metrics():
+    block = ('BIFROST-RESULT-BEGIN\n'
+             '{"pass": 1387, "fail": 0, "metrics": {"files": 1387, "decoded": 1387}}\n'
+             'BIFROST-RESULT-END\n')
+    got = ingest.parse_gate_stdout("corpus_res", "noise 99 things\n" + block)
+    check(got["declared"] is True, "a block must be recognised as declared")
+    check((got["pass"], got["fail"], got["ok"]) == (1387, 0, 1), str(got))
+    check(got["metrics"] == {"files": 1387, "decoded": 1387}, str(got["metrics"]))
+
+    kv = ("BIFROST-RESULT-BEGIN\n"
+          "pass=1387\nfail=0\nfiles=1387\n"
+          "BIFROST-RESULT-END\n")
+    got = ingest.parse_gate_stdout("corpus_res", kv)
+    check((got["pass"], got["fail"]) == (1387, 0), str(got))
+    check(got["metrics"] == {"files": 1387}, str(got["metrics"]))
+    return "JSON and KEY=value both declare; nothing else does"
+
+
+def test_a_malformed_block_refuses_rather_than_falling_back():
+    """The dangerous case: output somebody believed was structured."""
+    for body, why in (
+        ('{"pass": 1, "fail":}', "invalid JSON"),
+        ('{"pass": "many", "fail": 0}', "a non-integer count"),
+        ('the run went fine', "neither JSON nor KEY=value"),
+        ('{"metrics": {"files": 3}}', "no pass and no fail"),
+    ):
+        text = f"BIFROST-RESULT-BEGIN\n{body}\nBIFROST-RESULT-END\n0 fail\n12 pass\n"
+        try:
+            ingest.parse_gate_stdout("corpus_res", text)
+            raise AssertionError(f"{why} was accepted, and would fall back to guessing")
+        except BifrostError:
+            pass
+
+    two = ("BIFROST-RESULT-BEGIN\npass=1\nfail=0\nBIFROST-RESULT-END\n"
+           "BIFROST-RESULT-BEGIN\npass=2\nfail=0\nBIFROST-RESULT-END\n")
+    try:
+        ingest.parse_gate_stdout("corpus_res", two)
+        raise AssertionError("two blocks in one log was accepted")
+    except BifrostError:
+        pass
+    return "a broken declaration is refused, never re-read by the guesser"
+
+
+def test_corpus_res_summary_is_not_read_backwards():
+    """`PARSED OK: 1387   FAILED: 0` bound 1387 to fail and flipped the gate red.
+
+    A cold session reading the digest then saw a failing gate that had passed.
+    """
+    got = ingest.parse_gate_stdout("corpus_res", "Scanning...\nPARSED OK: 1387   FAILED: 0\n")
+    check(got["fail"] == 0, f"fail should be 0, got {got['fail']}")
+    check(got["ok"] == 1, "a clean run must not report red")
+
+    # ...while a colon that introduces a BREAKDOWN must not beat the real total.
+    got = ingest.parse_gate_stdout("corpus_wii_ob", REAL["corpus_wii_ob"])
+    check(got["fail"] == 4, f"the summary line's 4 wins over 'failures: 0', got {got['fail']}")
+    return "adjacency no longer decides which number is the failure count"
 
 
 def test_ingest_run_records_staleness_inputs():
@@ -153,7 +225,10 @@ def test_ingest_run_records_staleness_inputs():
     check(row["commit_sha"] == "abc123", str(row))
     check(row["stdout_head"] and "refused (42)" in row["stdout_head"],
           "the head must keep the tail of the output, which is where summaries live")
-    check(json.loads(row["metrics"]).get("vertices") == 14021613, row["metrics"])
+    # Only the two the database COMPUTES. Nothing is scraped out of the text:
+    # a probe declares its metrics in a BIFROST-RESULT block or has none.
+    check(set(json.loads(row["metrics"])) == {"accepted_exceptions", "unexplained_failures"},
+          row["metrics"])
 
     # unknown gate is refused rather than silently created
     try:
@@ -161,6 +236,65 @@ def test_ingest_run_records_staleness_inputs():
         raise AssertionError("an unknown gate was accepted")
     except BifrostError as e:
         check("unknown gate" in str(e), str(e))
+
+
+def test_supersede_retracts_a_misparse_without_unsaying_it():
+    """Append-only is right for evidence, wrong for a transcription error.
+
+    Run 32 of the BF3 database was `PARSED OK: 1387  FAILED: 0` read backwards.
+    It could not be retracted, so the correction became run 33 and the digest
+    listed both -- a failing gate in front of every session that read it cold.
+    """
+    conn = fresh()
+    bad = ingest.ingest_gate_run(conn, "corpus_mesh", "3200 pass, 94 fail",
+                                 commit_sha="a", tree_dirty=False)
+    check(core.one(conn, "SELECT ok FROM v_gate_latest WHERE name='corpus_mesh'")["ok"] == 0,
+          "the mis-parse is this gate's state until something supersedes it")
+
+    good = ingest.ingest_gate_run(conn, "corpus_mesh", "3294 pass, 0 fail",
+                                  commit_sha="a", tree_dirty=False, supersedes=bad,
+                                  note="run was PARSED OK read backwards, not a result")
+    latest = core.one(conn, "SELECT * FROM v_gate_latest WHERE name='corpus_mesh'")
+    check(latest["run_id"] == good and latest["ok"] == 1, str(latest))
+    check("read backwards" in (latest["note"] or ""), str(latest))
+
+    # The bad row is still there. Nothing was unsaid, only reclassified.
+    check(core.one(conn, "SELECT * FROM gate_run WHERE id=?", (bad,)) is not None,
+          "a superseded run must survive; it is the record of what the parser did")
+    check(digest.digest_data(conn)["recent"] == [] or
+          all(r["ts"] for r in digest.digest_data(conn)["recent"]), "digest still renders")
+    names = [(r["name"], r["ok"]) for r in digest.digest_data(conn)["recent"]]
+    check(names == [("corpus_mesh", 1)], f"the digest lists one run, not both: {names}")
+
+    for wrong, why in ((bad, "superseding an already-superseded run"),
+                       (9999, "superseding a run that does not exist")):
+        try:
+            ingest.ingest_gate_run(conn, "corpus_mesh", "1 pass, 0 fail", supersedes=wrong,
+                                   commit_sha="a", tree_dirty=False)
+            raise AssertionError(f"{why} was accepted")
+        except BifrostError:
+            pass
+
+    # ...and never across gates: a run can only supersede one of its own.
+    try:
+        ingest.ingest_gate_run(conn, "corpus_anim", "1 pass, 0 fail", supersedes=good,
+                               commit_sha="a", tree_dirty=False)
+        raise AssertionError("a run superseded another gate's run")
+    except BifrostError:
+        pass
+    return "the row stays, the views stop counting it"
+
+
+def test_note_keeps_interpretation_out_of_stdout():
+    conn = fresh()
+    rid = ingest.ingest_gate_run(
+        conn, "corpus_anim", REAL["corpus_anim"], commit_sha="a", tree_dirty=False,
+        note="bimodal by joint; the second mode is all eight of the cloth rigs")
+    row = core.one(conn, "SELECT * FROM gate_run WHERE id=?", (rid,))
+    check("bimodal" in row["note"], str(row["note"]))
+    check("bimodal" not in (row["stdout_head"] or ""),
+          "stdout stays the probe's own bytes; the conclusion is a person's")
+    return "measured and concluded are separable after the fact"
 
 
 def test_stdout_goes_to_disk():

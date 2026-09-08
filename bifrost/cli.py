@@ -260,7 +260,25 @@ def cmd_query(conn, args):
     if not view:
         print(f"[ERROR] unknown view {args.view!r}. Known: {', '.join(sorted(QUERYABLE))}")
         return 1
-    rows = core.rows(conn, f"SELECT * FROM {view} LIMIT ?", (args.limit,))
+    sql, params = f"SELECT * FROM {view}", []
+    if args.severity:
+        # v_claim_risk is 165 rows of which 158 are the low-severity "no gate
+        # invariant" (rule 4) exposure, so the handful that need a decision are
+        # 4% of what the view prints. Filtering is what makes it readable.
+        cols = [d[0] for d in conn.execute(f"SELECT * FROM {view} LIMIT 0").description]
+        if "severity" not in cols:
+            print(f"[ERROR] view {args.view!r} has no severity column")
+            return 1
+        known = {r["severity"] for r in core.rows(
+            conn, f"SELECT DISTINCT severity FROM {view}") if r["severity"]}
+        wanted = [s.strip().lower() for s in args.severity.split(",") if s.strip()]
+        if bad := [s for s in wanted if s not in known]:
+            print(f"[ERROR] unknown severity {', '.join(bad)}. "
+                  f"In this view: {', '.join(sorted(known))}")
+            return 1
+        sql += " WHERE severity IN (%s)" % ",".join("?" * len(wanted))
+        params += wanted
+    rows = core.rows(conn, sql + " LIMIT ?", (*params, args.limit))
     print(json.dumps(rows, indent=2) if args.json else _table(rows))
     return 0
 
@@ -269,7 +287,8 @@ def cmd_run(conn, args):
     text = Path(args.logfile).read_text(encoding="utf-8") if args.logfile else sys.stdin.read()
     try:
         rid = ingest.ingest_gate_run(conn, args.gate, text,
-                                     stdout_dir=core.repo_root() / "build" / "bifrost_logs")
+                                     stdout_dir=core.repo_root() / "build" / "bifrost_logs",
+                                     note=args.note, supersedes=args.supersedes)
     except core.BifrostError as e:
         # Most often: the wrong thing got piped in. Nothing was written.
         print(f"[ERROR] {e}")
@@ -281,6 +300,12 @@ def cmd_run(conn, args):
           + (f" ({m['unexplained_failures']} unexplained)"
              if m.get("unexplained_failures") else "")
           + ("  [dirty tree]" if row["tree_dirty"] else ""))
+    if row["supersedes"]:
+        print(f"[INFO] run #{rid} supersedes #{row['supersedes']}, which the views "
+              f"and the digest now skip")
+    if not ingest.parse_gate_stdout(args.gate, text)["declared"]:
+        print(f"[INFO] no BIFROST-RESULT block, so counts came from the summary line "
+              f"and no metrics were recorded. See README, 'Declaring a result'.")
     return 0 if row["ok"] else 1
 
 
@@ -428,10 +453,16 @@ def main(argv=None) -> int:
     s.add_argument("view", nargs="?", default="blocked")
     s.add_argument("--limit", type=int, default=50)
     s.add_argument("--json", action="store_true")
+    s.add_argument("--severity", metavar="high,medium",
+                   help="comma-separated, for views that carry a severity")
 
     s = sub.add_parser("run"); s.set_defaults(fn=cmd_run)
     s.add_argument("gate")
     s.add_argument("logfile", nargs="?", help="omit to read stdout from stdin")
+    s.add_argument("--note", help="what YOU concluded; stdout stays the probe's own output")
+    s.add_argument("--supersedes", type=int, metavar="RUN_ID",
+                   help="retract an earlier run of this gate that was a recording "
+                        "error rather than a result; the row stays, the views skip it")
 
     s = sub.add_parser("review"); s.set_defaults(fn=cmd_review)
     s.add_argument("--confirm", action="append")
