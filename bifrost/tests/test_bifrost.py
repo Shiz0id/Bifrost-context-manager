@@ -77,6 +77,25 @@ def test_migrations_apply():
         conn.execute(f"SELECT * FROM {v} LIMIT 1").fetchall()
 
 
+def test_invariant_coverage_reports_an_empty_project():
+    """`link` must not divide by zero when nothing has been seeded.
+
+    A project with no claims is the ordinary state of a new one, and of any
+    project whose seed stopped early. Reporting a percentage of nothing raised
+    ZeroDivisionError, which reads as a Bifrost defect rather than as "there is
+    nothing here yet".
+    """
+    from bifrost.cli import invariant_coverage_line
+
+    empty = invariant_coverage_line(0, 0)
+    check("no claims recorded yet" in empty, f"unhelpful empty line: {empty!r}")
+    check("%" not in empty, "an empty project has no percentage to report")
+
+    some = invariant_coverage_line(7, 16)
+    check("7 of 16" in some and "(44%)" in some, f"bad coverage line: {some!r}")
+    return "0 of 0 reports instead of dividing"
+
+
 def test_migrations_idempotent():
     path = Path(tempfile.mkdtemp()) / "b.db"
     try:
