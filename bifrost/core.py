@@ -451,7 +451,8 @@ def close_todo(conn: sqlite3.Connection, todo_id: int,
             f"use `bifrost review --reject todo:{todo_id}` to turn down a proposal")
     if row["status"] in CLOSED_STATUSES:
         raise BifrostError(f"todo #{todo_id} is already {row['status']}")
-    conn.execute("UPDATE todo SET status=? WHERE id=?", (status, todo_id))
+    conn.execute("UPDATE todo SET status=?, closed_at=? WHERE id=?",
+                 (status, utcnow(), todo_id))
     conn.commit()
     return one(conn, "SELECT * FROM todo WHERE id=?", (todo_id,))
 

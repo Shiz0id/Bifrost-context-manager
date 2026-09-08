@@ -368,8 +368,17 @@ def test_close_todo_requires_confirmation_and_drops_out_of_the_digest():
     open_now = [t["title"] for t in digest.digest_data(conn)["todos"]]
     check(open_now == ["Read the .wft font format"], str(open_now))
 
+    before = core.one(conn, "SELECT * FROM todo WHERE id=?", (tid,))
+    check(before["closed_at"] is None, "an open todo has no closed_at")
+
     row = core.close_todo(conn, tid)
     check(row["status"] == "done", str(row))
+    # The question this column exists to answer: when, not merely whether. A
+    # todo closed by hand in SQL leaves it NULL, which is how the two are told
+    # apart after the fact.
+    # utcnow() is whole seconds, so a test that proposes and closes in the same
+    # second gets equal stamps; ordering is what the column has to preserve.
+    check(row["closed_at"] and row["closed_at"] >= row["confirmed_at"], str(row))
     check(digest.digest_data(conn)["todos"] == [], "a closed todo must leave OPEN WORK")
 
     for bad, why in ((tid, "closing twice"), (9999, "a todo that does not exist")):
