@@ -92,6 +92,42 @@ def test_migrations_idempotent():
         shutil.rmtree(path.parent, ignore_errors=True)
 
 
+def test_seed_validates_the_profile_before_writing():
+    """A vocabulary the schema rejects must be caught before any row lands.
+
+    seed() commits formats and capabilities before it reaches exceptions, so a
+    bad disposition used to raise a raw sqlite CHECK failure with two sections
+    already committed -- naming a constraint rather than the profile field, and
+    leaving a half-populated database for the retry to trip over.
+    """
+    from types import SimpleNamespace
+
+    from bifrost import seed as seed_mod
+
+    bad = SimpleNamespace(
+        EXCEPTIONS=[("krayt stride", "expected", "because", [])],
+        CLAIMS=[{"statement": "a statement", "status": "probably",
+                 "citations": []}],
+    )
+    problems = seed_mod.validate(bad)
+    check(len(problems) == 3, f"expected 3 problems, got {problems}")
+
+    joined = " | ".join(problems)
+    check("defect_in_shipped_data" in joined,
+          "the error must name the legal dispositions, not just reject")
+    check("'expected'" in joined, "the error must quote the offending value")
+    check("plausible" in joined, "the error must name the legal claim statuses")
+    check("citations" in joined, "a claim with no citation must be caught here")
+
+    good = SimpleNamespace(
+        EXCEPTIONS=[("krayt stride", "reported", "because", [])],
+        CLAIMS=[{"statement": "a statement", "status": "assumed",
+                 "citations": [{"kind": "disasm_fn", "locator": "0x82000000"}]}],
+    )
+    check(seed_mod.validate(good) == [], "a legal profile must validate clean")
+    return "3 problems reported together, before anything is written"
+
+
 def test_claim_requires_citation():
     conn = fresh()
     try:

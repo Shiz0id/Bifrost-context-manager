@@ -48,6 +48,13 @@ def symbol_db() -> Optional[Path]:
     p = profile.load().SYMBOL_DB
     return Path(p) if p else None
 
+# The dispositions an exception may carry, matching the CHECK in 001_initial.
+# Named here so seed can report the legal set instead of letting sqlite report a
+# constraint, and so a profile author has somewhere to look it up.
+EXCEPTION_DISPOSITIONS = {"reported", "refused", "defect_in_shipped_data"}
+
+CLAIM_STATUSES = {"assumed", "plausible", "verified"}
+
 SOURCE_KINDS = {
     "disasm_fn", "data_addr", "pdb_type", "map_symbol", "build_manifest",
     "shipped_file", "shipped_shader", "design_doc", "measurement", "cross_build",

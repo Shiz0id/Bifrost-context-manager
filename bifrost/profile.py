@@ -10,7 +10,9 @@ Battlefront III. What it needs from a project is DATA:
                     exercise -- the last is what makes staleness computable
     FORMATS         the formats being read, anchored to the document's sections
     CAPABILITIES    what the project is trying to be able to do, and what gates it
-    EXCEPTIONS      named, justified non-passing files (rule 4)
+    EXCEPTIONS      named, justified non-passing files (rule 4). The
+                    disposition is one of core.EXCEPTION_DISPOSITIONS:
+                    reported | refused | defect_in_shipped_data
     CLAIMS, TODOS   the seeded judgements
     ANCHOR_MAP      document section -> format
     INVARIANTS      what each gate asserts, and which claims that backs
