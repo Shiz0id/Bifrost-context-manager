@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
-from bifrost import core  # noqa: E402
+from bifrost import core, digest  # noqa: E402
 from bifrost.core import BifrostError  # noqa: E402
 
 RESULTS = []
@@ -349,6 +349,52 @@ def test_review_boundary():
         raise AssertionError("an invalid decision was accepted")
     except BifrostError:
         pass
+
+
+def test_close_todo_requires_confirmation_and_drops_out_of_the_digest():
+    conn = fresh()
+    tid = core.propose(conn, "todo", {"title": "Read the .wft font format",
+                                      "rationale": "a version delta on a solved format"})
+
+    # A proposal is rejected at review, never closed: 'done' has to mean the
+    # work happened, so it cannot be reachable from something never agreed to.
+    try:
+        core.close_todo(conn, tid)
+        raise AssertionError("an unconfirmed todo was closed")
+    except BifrostError as e:
+        check("not confirmed" in str(e), str(e))
+
+    core.review(conn, "todo", tid, "confirmed")
+    open_now = [t["title"] for t in digest.digest_data(conn)["todos"]]
+    check(open_now == ["Read the .wft font format"], str(open_now))
+
+    row = core.close_todo(conn, tid)
+    check(row["status"] == "done", str(row))
+    check(digest.digest_data(conn)["todos"] == [], "a closed todo must leave OPEN WORK")
+
+    for bad, why in ((tid, "closing twice"), (9999, "a todo that does not exist")):
+        try:
+            core.close_todo(conn, bad)
+            raise AssertionError(f"{why} was accepted")
+        except BifrostError:
+            pass
+
+    tid2 = core.propose(conn, "todo", {"title": "XMA1 decode"})
+    core.review(conn, "todo", tid2, "confirmed")
+    check(core.close_todo(conn, tid2, "abandoned")["status"] == "abandoned", "abandon")
+    try:
+        core.close_todo(conn, tid2, "in_progress")
+        raise AssertionError("'in_progress' is not a closed status")
+    except BifrostError:
+        pass
+
+
+def test_close_is_not_on_the_mcp_surface():
+    """The whole point: an agent cannot mark its own work done."""
+    from bifrost import mcp_server
+    names = [t["name"] for t in mcp_server.TOOLS]
+    check(not any("close" in n for n in names), str(names))
+    check("bifrost_propose" in names, str(names))
 
 
 def test_edge_kind_validated():

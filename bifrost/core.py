@@ -423,6 +423,39 @@ def review(conn: sqlite3.Connection, kind: str, row_id: int, decision: str) -> N
     conn.commit()
 
 
+CLOSED_STATUSES = ("done", "abandoned")
+
+
+def close_todo(conn: sqlite3.Connection, todo_id: int,
+               status: str = "done") -> dict:
+    """Close a todo: 'done' when the work landed, 'abandoned' when it will not.
+
+    Deliberately NOT exposed over MCP, for the same reason as review(). An agent
+    that can mark its own work done can report a project finished without any of
+    it being true, and the digest's OPEN WORK section is exactly the list that
+    would go quiet. Closing is a judgement about the world, not something
+    derivable from the database.
+
+    Only a confirmed todo can be closed. A proposal that should not happen is
+    rejected at review, not closed -- keeping the two verbs from overlapping is
+    what makes 'done' mean the work actually happened.
+    """
+    if status not in CLOSED_STATUSES:
+        raise BifrostError(f"status must be one of {CLOSED_STATUSES}")
+    row = one(conn, "SELECT * FROM todo WHERE id=?", (todo_id,))
+    if row is None:
+        raise BifrostError(f"no todo #{todo_id}")
+    if row["review_state"] != "confirmed":
+        raise BifrostError(
+            f"todo #{todo_id} is {row['review_state']}, not confirmed; "
+            f"use `bifrost review --reject todo:{todo_id}` to turn down a proposal")
+    if row["status"] in CLOSED_STATUSES:
+        raise BifrostError(f"todo #{todo_id} is already {row['status']}")
+    conn.execute("UPDATE todo SET status=? WHERE id=?", (status, todo_id))
+    conn.commit()
+    return one(conn, "SELECT * FROM todo WHERE id=?", (todo_id,))
+
+
 # ---------------------------------------------------------------------------
 # git state — what makes staleness computable rather than declared
 # ---------------------------------------------------------------------------

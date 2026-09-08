@@ -1,8 +1,8 @@
 """Bifrost CLI — `python -m bifrost <command>`.
 
 The human half of the interface, and deliberately a superset of the MCP surface:
-`review` lives here and only here, so an agent is structurally incapable of
-confirming its own proposals.
+`review` and `close` live here and only here, so an agent is structurally
+incapable of confirming its own proposals or declaring its own work done.
 
     python -m bifrost bootstrap          scan, ingest symbols, register gates
     python -m bifrost seed               the mutable core (formats, capabilities)
@@ -14,6 +14,7 @@ confirming its own proposals.
     python -m bifrost link               attach claims to formats, link evidence
     python -m bifrost dump / restore     the knowledge layer as committable JSONL
     python -m bifrost review             confirm or reject proposals
+    python -m bifrost close <id>...      close a todo: done, or abandoned
     python -m bifrost test               run both test suites
 """
 
@@ -300,6 +301,32 @@ def cmd_review(conn, args):
     return 0
 
 
+def cmd_close(conn, args):
+    """Close a todo. CLI-only, like review: see core.close_todo."""
+    if not args.id:
+        q = core.rows(conn, """
+            SELECT id, COALESCE(priority, 999) pri, difficulty, status, title
+            FROM todo WHERE review_state='confirmed' AND status IN ('open','in_progress')
+            ORDER BY pri, id""")
+        if not q:
+            print("(nothing open)")
+            return 0
+        print(_table(q))
+        print("\nClose with:  python -m bifrost close 4")
+        print("             python -m bifrost close 4 --status abandoned")
+        return 0
+    rc = 0
+    for tid in args.id:
+        try:
+            row = core.close_todo(conn, tid, args.status)
+        except core.BifrostError as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+            rc = 1
+            continue
+        print(f"[SUCCESS] todo #{tid} {row['status']}: {row['title']}")
+    return rc
+
+
 def cmd_dump(conn, args):
     """Write the hand-written knowledge layer out as committable JSONL."""
     if not dump_mod.verify(conn):
@@ -409,6 +436,12 @@ def main(argv=None) -> int:
     s = sub.add_parser("review"); s.set_defaults(fn=cmd_review)
     s.add_argument("--confirm", action="append")
     s.add_argument("--reject", action="append")
+
+    s = sub.add_parser("close"); s.set_defaults(fn=cmd_close)
+    s.add_argument("id", nargs="*", type=int,
+                   help="todo ids to close; omit to list what is open")
+    s.add_argument("--status", choices=list(core.CLOSED_STATUSES), default="done",
+                   help="done: the work landed. abandoned: it will not happen.")
 
     s = sub.add_parser("dump"); s.set_defaults(fn=cmd_dump)
 

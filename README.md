@@ -103,8 +103,18 @@ bifrost_record_evidence   discriminator | refutation | tautology
 bifrost_propose           todo | capability | edge, landing as 'proposed'
 ```
 
-**There is deliberately no `bifrost_review`.** Confirming proposals exists only in the CLI, so
-an agent is structurally incapable of approving its own work. A test pins that.
+**There is deliberately no `bifrost_review` and no `bifrost_close`.** Confirming a proposal and
+closing a todo exist only in the CLI, so an agent is structurally incapable of approving its own
+work or declaring it done. Tests pin both.
+
+```
+python -m bifrost close                  what is open, with ids
+python -m bifrost close 4                the work landed
+python -m bifrost close 4 --status abandoned
+```
+
+Only a *confirmed* todo can be closed: a proposal that should not happen is turned down with
+`review --reject`, which keeps `done` meaning the work actually happened.
 
 ## Hooks
 
