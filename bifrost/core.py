@@ -51,6 +51,12 @@ def symbol_db() -> Optional[Path]:
 SOURCE_KINDS = {
     "disasm_fn", "data_addr", "pdb_type", "map_symbol", "build_manifest",
     "shipped_file", "shipped_shader", "design_doc", "measurement", "cross_build",
+    # This project's own reasoning, at "src/SelotapeDataLoaders.cpp:344". NOT
+    # the same thing as disasm_fn: that cites the retail function, this cites
+    # what we concluded about it. Backing-wise it behaves like `measurement` --
+    # our own note is not evidence for itself -- but a claim can finally point
+    # at the code that embodies it, which nothing could express before.
+    "source_comment",
 }
 
 EDGE_KINDS = {

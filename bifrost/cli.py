@@ -15,6 +15,7 @@ incapable of confirming its own proposals or declaring its own work done.
     python -m bifrost dump / restore     the knowledge layer as committable JSONL
     python -m bifrost review             confirm or reject proposals
     python -m bifrost check              propose / list / settle a discriminator
+    python -m bifrost comments [addr]    index / search the evidence in code comments
     python -m bifrost close <id>...      close a todo: done, or abandoned
     python -m bifrost test               run both test suites
 """
@@ -49,6 +50,7 @@ QUERYABLE = {
     "exceptions": "exception",
     "todos": "todo",
     "open_checks": "v_discriminator_open",
+    "comments": "v_code_comment",
     "sources": "source",
 }
 
@@ -344,6 +346,42 @@ def cmd_review(conn, args):
     return 0
 
 
+def cmd_comments(conn, args):
+    """Index, or look up, the evidence written in the code's own comments."""
+    from . import comments as cm
+
+    if args.scan:
+        st = cm.scan(conn, verbose=False)
+        print(f"[SUCCESS] {st['blocks']} citing comment blocks across "
+              f"{st['files_citing']} of {st['files']} tracked source files "
+              f"({st['citations']} citations)")
+        print(f"          {st['new']} new, {st['updated']} changed, {st['removed']} removed")
+        return 0
+
+    if args.locator:
+        hits = cm.explaining(conn, args.locator, limit=args.limit)
+        if not hits:
+            print(f"(no comment cites {args.locator})")
+            return 0
+        for h in hits:
+            mark = "  [STALE: the file moved on; re-scan]" if h["stale"] else ""
+            print(f"--- {h['path']}:{h['line']}-{h['end_line']}{mark}")
+            print("    " + h["prose"].replace("\n", "\n    "))
+        return 0
+
+    tot = core.one(conn, "SELECT COUNT(*) n FROM code_comment")["n"]
+    if not tot:
+        print("(nothing indexed; run `bifrost comments --scan`)")
+        return 0
+    stale = core.one(conn, "SELECT COUNT(*) n FROM v_code_comment WHERE stale=1")["n"]
+    print(f"{tot} citing comment blocks indexed, {stale} stale")
+    print(_table(core.rows(conn, """
+        SELECT path, COUNT(*) blocks, SUM(n_citations) citations
+        FROM v_code_comment GROUP BY path ORDER BY citations DESC LIMIT ?""",
+        (args.limit,))))
+    return 0
+
+
 def cmd_check(conn, args):
     """Propose a discriminator, list the open ones, or settle one with results.
 
@@ -535,6 +573,11 @@ def main(argv=None) -> int:
     s = sub.add_parser("review"); s.set_defaults(fn=cmd_review)
     s.add_argument("--confirm", action="append")
     s.add_argument("--reject", action="append")
+
+    s = sub.add_parser("comments"); s.set_defaults(fn=cmd_comments)
+    s.add_argument("locator", nargs="?", help="an address or field; show what explains it")
+    s.add_argument("--scan", action="store_true", help="re-index the tracked sources")
+    s.add_argument("--limit", type=int, default=10)
 
     s = sub.add_parser("check"); s.set_defaults(fn=cmd_check)
     s.add_argument("--claim", type=int, help="the reading this check would confirm")

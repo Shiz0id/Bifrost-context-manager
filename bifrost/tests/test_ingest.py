@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -283,6 +284,93 @@ def test_supersede_retracts_a_misparse_without_unsaying_it():
     except BifrostError:
         pass
     return "the row stays, the views stop counting it"
+
+
+def _tiny_repo(files: dict) -> Path:
+    """A throwaway git repo, because the scanner reads `git ls-files`."""
+    d = Path(tempfile.mkdtemp())
+    for name, body in files.items():
+        p = d / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    run = lambda *a: subprocess.run(a, cwd=str(d), capture_output=True, text=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t"); run("git", "config", "user.name", "t")
+    run("git", "add", "-A"); run("git", "commit", "-qm", "in")
+    return d
+
+
+def test_code_comments_are_indexed_with_their_citations():
+    """The evidence written in the code was not in the knowledge layer.
+
+    Over the BF3 tree, 235 retail addresses are cited in source comments and 107
+    of them appeared nowhere else -- so an agent resolving one was told nothing
+    was known while a header already explained it.
+    """
+    from bifrost import comments as cm
+    conn = fresh()
+    d = _tiny_repo({
+        "src/a.cpp": (
+            "// obGetPart, 0x825b1678. The part array is ob+0x18 and the count\n"
+            "// sits at ob+0x14, which obGetNumParts (0x825b1638) bounds against.\n"
+            "int f() { return 1; }\n"
+            "// an ordinary comment carrying no provenance at all\n"),
+        "tools/b.py": "# m0vTick at 0x8266b628 drives one frame\nx = 1\n",
+        "README.md": "# not a source file\n",
+    })
+    try:
+        st = cm.scan(conn, root=d)
+        check(st["blocks"] == 2, f"two citing blocks, got {st['blocks']}: {st}")
+        check(st["files"] == 2, f"only the source files are read, got {st['files']}")
+
+        rows = core.rows(conn, "SELECT * FROM v_code_comment ORDER BY path")
+        check(len(rows) == 2, str(rows))
+        check(rows[0]["path"] == "src/a.cpp" and rows[0]["n_citations"] == 2, str(rows[0]))
+        check(all(r["stale"] == 0 for r in rows), "a fresh scan is not stale")
+
+        # The prose with no provenance must NOT be indexed: burying the rows that
+        # matter under the ones that do not is how an index stops being read.
+        check("ordinary comment" not in rows[0]["prose"], rows[0]["prose"])
+
+        # The payoff: the question "has anyone worked this out already".
+        hits = cm.explaining(conn, "0x825b1678")
+        check(len(hits) == 1 and "part array" in hits[0]["prose"], str(hits))
+        check(cm.explaining(conn, "0x8266b628"), "python comments count too")
+        check(cm.explaining(conn, "0xdeadbeef") == [], "and nothing is invented")
+
+        # Re-scanning is idempotent, and an edited block updates in place.
+        st2 = cm.scan(conn, root=d)
+        check((st2["new"], st2["updated"], st2["removed"]) == (0, 0, 0), str(st2))
+        (d / "src/a.cpp").write_text(
+            "// obGetPart, 0x825b1678. Rewritten, same address.\nint f(){return 1;}\n",
+            encoding="utf-8")
+        st3 = cm.scan(conn, root=d)
+        check(st3["updated"] == 1, f"an edited block updates in place: {st3}")
+        check(core.one(conn, "SELECT COUNT(*) n FROM code_comment WHERE path='src/a.cpp'")["n"] == 1,
+              "and does not duplicate")
+        check(cm.explaining(conn, "0x825b1638") == [],
+              "an address the rewrite dropped must stop being reachable")
+        return "248 blocks over the real tree; here, the whole lifecycle"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_comment_is_not_evidence_for_itself():
+    """source_comment is a citable kind, but it must not BACK a claim.
+
+    Citing our own note as proof of our own note is the circularity the backing
+    rules exist to stop -- it behaves like `measurement`, not like `disasm_fn`.
+    """
+    conn = fresh()
+    cid = core.record_claim(
+        conn, subject_type="format", subject_id=None,
+        statement="the part array is at ob+0x18", asserted_status="verified",
+        citations=[{"kind": "source_comment",
+                    "locator": "src/SelotapeDataLoaders.cpp:344"}])
+    got = core.one(conn, "SELECT * FROM v_claim_status WHERE id=?", (cid,))
+    check(got["effective_status"] == "asserted-unbacked",
+          f"a comment must not back its own claim, got {got['effective_status']}")
+    return "citable, and correctly not evidence for itself"
 
 
 def test_a_run_can_pass_and_still_have_found_something():

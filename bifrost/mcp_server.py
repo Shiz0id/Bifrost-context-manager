@@ -103,7 +103,12 @@ TOOLS = [
             "and 286,660 struct fields for the 360, 3,113 map symbols for the Wii. Returns an "
             "exact hit, or the containing function and offset, or unresolved. Unresolved is "
             "often CORRECT: the 360 map holds functions and classes only, so a constant pool "
-            "has no symbol, and the Wii map is sparse with gaps up to 185 KB."),
+            "has no symbol, and the Wii map is sparse with gaps up to 185 KB. Also returns "
+            "`explained_in`: the project's OWN source comments citing that address, which in "
+            "this codebase carry provenance and are evidence. Check that before you "
+            "disassemble -- 107 of the 235 addresses cited in these comments appeared nowhere "
+            "else in the database, so the alternative was re-deriving what a header three "
+            "directories away already said."),
         "inputSchema": {"type": "object", "properties": {
             "addr": _str("hex address, e.g. 0x825ae690"),
             "struct": _str("struct name, to list its fields with offsets"),
@@ -254,6 +259,20 @@ def call_tool(name: str, args: dict) -> Any:
                                "and classes only, so constant pools and tables have none, and "
                                "the Wii map is sparse. Cite it as kind=data_addr with its "
                                "meaning as the note.")
+            # Somebody may already have worked this out and written it down in
+            # the code. Before this it was a grep nobody had a reason to run,
+            # and the cost was disassembling a function a header already
+            # explained.
+            from . import comments as cm
+            if (found := cm.explaining(c, args["addr"].lower(), limit=3)):
+                out["explained_in"] = [
+                    {"where": f"{h['path']}:{h['line']}-{h['end_line']}",
+                     "prose": h["prose"],
+                     "stale": bool(h["stale"])} for h in found]
+                out["explained_note"] = (
+                    "This project's comments cite provenance, so these are evidence. "
+                    "Read them before disassembling. `stale` means the file has moved "
+                    "on since the index was built, not that the comment is wrong.")
         if args.get("struct"):
             if args.get("field"):
                 row = core.pdb_field(c, args["struct"], args["field"])

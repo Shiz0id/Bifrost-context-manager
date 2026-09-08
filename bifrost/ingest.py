@@ -577,6 +577,19 @@ def bootstrap(conn: sqlite3.Connection, *, scan: bool = True,
     log(f"[SUCCESS] git: {stats['git_state']} reader paths, "
         f"{stats['git_ancestry']} commits of ancestry")
 
+    # The evidence written in the project's own comments. Cheap (it reads the
+    # tracked sources, not the asset trees) and it keeps the index honest, since
+    # a stale row is only stale until the next bootstrap.
+    try:
+        from . import comments as comments_mod
+        cs = comments_mod.scan(conn)
+        stats["comment_blocks"] = cs["blocks"]
+        log(f"[SUCCESS] code comments: {cs['blocks']} citing blocks in "
+            f"{cs['files_citing']} files, {cs['citations']} citations")
+    except BifrostError as e:
+        stats["comment_blocks"] = 0
+        log(f"[ERROR] code comments: {e}")
+
     if scan:
         for b in ("bf3_360", "bf3_wii"):
             try:
